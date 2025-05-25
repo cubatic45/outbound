@@ -4,9 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/binary"
 	"fmt"
 	"net"
-	"sync/atomic"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
@@ -22,7 +22,6 @@ type Dialer struct {
 	metadata     protocol.Metadata
 	key          []byte
 	tlsConfig    *tls.Config
-	sid          atomic.Uint32
 }
 
 func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
@@ -71,12 +70,37 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 			Mark:    magicNetwork.Mark,
 			Mptcp:   magicNetwork.Mptcp,
 		}.Encode()
-		conn, err := d.nextDialer.DialContext(ctx, tcpNetwork, d.proxyAddress)
+		s, err := d.loadSession(func() (netproxy.Conn, error) {
+			conn, err := d.nextDialer.DialContext(ctx, tcpNetwork, d.proxyAddress)
+			if err != nil {
+				return nil, err
+			}
+			tlsConn := tls.Client(conn.(net.Conn), d.tlsConfig)
+
+			password := d.key
+			b := make([]byte, len(password)+2)
+			copy(b, password)
+			binary.BigEndian.PutUint16(b[len(password):], uint16(0))
+			if _, err := tlsConn.Write(b); err != nil {
+				return nil, err
+			}
+			return tlsConn, nil
+		})
+		addr := fmt.Sprintf("%s:%d", mdata.Hostname, mdata.Port)
 		if err != nil {
 			return nil, err
 		}
-		return d.newAnytlsConn(tls.Client(conn.(net.Conn), d.tlsConfig), mdata)
+		go s.run()
+		return s.newStream(addr)
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, magicNetwork.Network)
 	}
+}
+
+func (d *Dialer) loadSession(f func() (netproxy.Conn, error)) (*session, error) {
+	conn, err := f()
+	if err != nil {
+		return nil, err
+	}
+	return newSession(conn)
 }
