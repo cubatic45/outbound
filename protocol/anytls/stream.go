@@ -96,7 +96,7 @@ func (c *stream) WriteTo(p []byte, addr string) (n int, err error) {
 		if _, err := writeFrame(c.Conn, frame); err != nil {
 			return 0, err
 		}
-		c.addr = netip.MustParseAddrPort(addr)
+		c.addr, _ = netip.ParseAddrPort(addr)
 		return len(p), nil
 	}
 
@@ -110,6 +110,6 @@ func (c *stream) WriteTo(p []byte, addr string) (n int, err error) {
 	if _, err := writeFrame(c.Conn, frame); err != nil {
 		return 0, err
 	}
-	c.addr = netip.MustParseAddrPort(addr)
+	c.addr, _ = netip.ParseAddrPort(addr)
 	return len(p), nil
 }
