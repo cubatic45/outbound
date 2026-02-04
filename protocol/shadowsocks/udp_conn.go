@@ -34,7 +34,7 @@ func NewUdpConn(conn netproxy.PacketConn, proxyAddress string, metadata protocol
 	}
 	key := make([]byte, len(masterKey))
 	copy(key, masterKey)
-	sg, err := GetSaltGenerator(masterKey, conf.SaltLen)
+	sg, err := NewRandomSaltGenerator(conf.SaltLen)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +91,7 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	toWrite, err := EncryptUDPFromPool(&Key{
 		CipherConf: c.cipherConf,
 		MasterKey:  c.masterKey,
-	}, chunk, salt, ciphers.ShadowsocksReusedInfo)
+	}, chunk, salt, ShadowsocksReusedInfo)
 	pool.Put(salt)
 	if err != nil {
 		return 0, err
@@ -114,7 +114,7 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 	n, err = DecryptUDP(b, &Key{
 		CipherConf: c.cipherConf,
 		MasterKey:  c.masterKey,
-	}, enc[:n], ciphers.ShadowsocksReusedInfo)
+	}, enc[:n], ShadowsocksReusedInfo)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}

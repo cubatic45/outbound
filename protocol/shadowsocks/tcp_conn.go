@@ -26,7 +26,8 @@ const (
 )
 
 var (
-	ErrFailInitCipher = fmt.Errorf("fail to initiate cipher")
+	ErrFailInitCipher     = fmt.Errorf("fail to initiate cipher")
+	ShadowsocksReusedInfo = []byte("ss-subkey")
 )
 
 type TCPConn struct {
@@ -70,7 +71,7 @@ func NewTCPConn(conn netproxy.Conn, metadata protocol.Metadata, masterKey []byte
 	if conf.NewCipher == nil {
 		return nil, fmt.Errorf("invalid CipherConf")
 	}
-	sg, err := GetSaltGenerator(masterKey, conf.SaltLen)
+	sg, err := NewRandomSaltGenerator(conf.SaltLen)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +126,7 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 			sha1.New,
 			c.masterKey,
 			salt,
-			ciphers.ShadowsocksReusedInfo,
+			ShadowsocksReusedInfo,
 		)
 		_, err = io.ReadFull(kdf, subKey)
 		if err != nil {
@@ -222,7 +223,7 @@ func (c *TCPConn) initWriteFromPool(b []byte) (buf []byte, offset int, toWrite [
 		sha1.New,
 		c.masterKey,
 		buf[:c.cipherConf.SaltLen],
-		ciphers.ShadowsocksReusedInfo,
+		ShadowsocksReusedInfo,
 	)
 	_, err = io.ReadFull(kdf, subKey)
 	if err != nil {
