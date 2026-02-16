@@ -53,17 +53,22 @@ func ValidateBase64PSK(pskBase64 string, expectedKeyLen int) ([]byte, error) {
 
 // SlidingWindowFilter implements a sliding window filter for packet ID replay protection
 type SlidingWindowFilter struct {
-	window     []uint64
-	windowSize int
-	latest     uint64
-	mutex      sync.RWMutex
+	window      []uint64
+	windowSize  uint64
+	latest      uint64
+	initialized bool
+	mutex       sync.Mutex
 }
 
 // NewSlidingWindowFilter creates a new sliding window filter
 func NewSlidingWindowFilter(windowSize int) *SlidingWindowFilter {
+	if windowSize <= 0 {
+		windowSize = 1024
+	}
+	wordCount := (windowSize + 63) / 64
 	return &SlidingWindowFilter{
-		window:     make([]uint64, windowSize),
-		windowSize: windowSize,
+		window:     make([]uint64, wordCount),
+		windowSize: uint64(windowSize),
 	}
 }
 
@@ -71,50 +76,63 @@ func NewSlidingWindowFilter(windowSize int) *SlidingWindowFilter {
 func (f *SlidingWindowFilter) CheckAndUpdate(packetID uint64) bool {
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
-
-	// Packet ID too old
-	if packetID+uint64(f.windowSize) <= f.latest {
-		return false
-	}
-
-	// Packet ID in the future, update latest
-	if packetID > f.latest {
-		// Shift window
-		shift := packetID - f.latest
-		if shift >= uint64(f.windowSize) {
-			// Clear entire window
-			for i := range f.window {
-				f.window[i] = 0
-			}
-		} else {
-			// Shift window by 'shift' positions
-			for i := 0; i < len(f.window)-int(shift); i++ {
-				f.window[i] = f.window[i+int(shift)]
-			}
-			for i := len(f.window) - int(shift); i < len(f.window); i++ {
-				f.window[i] = 0
-			}
-		}
+	if !f.initialized {
+		f.initialized = true
 		f.latest = packetID
+		f.setBit(0)
 		return true
 	}
 
-	// Packet ID in the window
-	index := int(f.latest - packetID)
-	if index >= f.windowSize {
-		return false
+	if packetID > f.latest {
+		shift := packetID - f.latest
+		f.shiftWindow(shift)
+		f.latest = packetID
+		f.setBit(0)
+		return true
 	}
 
+	distance := f.latest - packetID
+	if distance >= f.windowSize {
+		return false
+	}
+	if f.getBit(distance) {
+		return false
+	}
+	f.setBit(distance)
+	return true
+}
+
+func (f *SlidingWindowFilter) getBit(index uint64) bool {
 	wordIndex := index / 64
 	bitIndex := index % 64
-	mask := uint64(1) << bitIndex
+	return f.window[wordIndex]&(uint64(1)<<bitIndex) != 0
+}
 
-	// Check if already seen
-	if f.window[wordIndex]&mask != 0 {
-		return false
+func (f *SlidingWindowFilter) setBit(index uint64) {
+	wordIndex := index / 64
+	bitIndex := index % 64
+	f.window[wordIndex] |= uint64(1) << bitIndex
+}
+
+func (f *SlidingWindowFilter) setBitInWindow(window []uint64, index uint64) {
+	wordIndex := index / 64
+	bitIndex := index % 64
+	window[wordIndex] |= uint64(1) << bitIndex
+}
+
+func (f *SlidingWindowFilter) shiftWindow(shift uint64) {
+	if shift >= f.windowSize {
+		for i := range f.window {
+			f.window[i] = 0
+		}
+		return
 	}
 
-	// Mark as seen
-	f.window[wordIndex] |= mask
-	return true
+	newWindow := make([]uint64, len(f.window))
+	for i := uint64(0); i+shift < f.windowSize; i++ {
+		if f.getBit(i) {
+			f.setBitInWindow(newWindow, i+shift)
+		}
+	}
+	copy(f.window, newWindow)
 }

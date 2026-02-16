@@ -14,6 +14,8 @@ import (
 	"github.com/daeuniverse/outbound/protocol/socks5"
 )
 
+const maxPSKListLength = 8
+
 // FakeNetPacketConn wraps a PacketConn to work with specific address
 type FakeNetPacketConn struct {
 	netproxy.PacketConn
@@ -50,7 +52,16 @@ type Dialer struct {
 
 func NewDialer(parentDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
 	conf := ciphers.Aead2022CiphersConf[header.Cipher]
+	if conf == nil {
+		return nil, fmt.Errorf("unsupported shadowsocks 2022 cipher: %s", header.Cipher)
+	}
+	if conf.NewCipher == nil || conf.NewBlockCipher == nil {
+		return nil, fmt.Errorf("invalid shadowsocks 2022 cipher config: %s", header.Cipher)
+	}
 	keyStrList := strings.Split(header.Password, ":")
+	if len(keyStrList) > maxPSKListLength {
+		return nil, fmt.Errorf("too many PSKs: got %d, max %d", len(keyStrList), maxPSKListLength)
+	}
 	pskList := make([][]byte, len(keyStrList))
 	for i, keyStr := range keyStrList {
 		key, err := ciphers.ValidateBase64PSK(keyStr, conf.KeyLen)

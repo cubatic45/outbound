@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"runtime/debug"
 	"sync"
 	"time"
 
@@ -127,11 +126,11 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 			return 0, fmt.Errorf("received unexpected header type: %d", typ)
 		}
 
-		if timestamp.Before(time.Now().Add(-ciphers.TimestampTolerance)) {
-			return 0, protocol.ErrReplayAttack
+		if err := validateTimestamp(timestamp, time.Now()); err != nil {
+			return 0, err
 		}
 
-		// TODO: 不应该使用 bloom filter
+		// Best-effort replay protection fallback for environments that provide bloom.
 		if c.bloom != nil {
 			if c.bloom.ExistOrAdd(salt) {
 				return 0, protocol.ErrReplayAttack
@@ -239,21 +238,18 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 
 		err := c.writeIdentityHeader(buf, salt)
 		if err != nil {
-			debug.PrintStack()
 			return 0, oops.Wrapf(err, "fail to write identity header")
 		}
 
 		// Setup encryption
 		c.cipherWrite, err = CreateCipher(c.uPSK, salt, c.cipherConf)
 		if err != nil {
-			debug.PrintStack()
 			return 0, oops.Wrapf(err, "fail to initiate cipher")
 		}
 
 		// Add Request headers
 		fixedHeader, varHeader, err := EncodeRequestHeader(HeaderTypeClientStream, uint64(time.Now().Unix()), c.addr, &b)
 		if err != nil {
-			debug.PrintStack()
 			return 0, oops.Wrapf(err, "fail to encode request header")
 		}
 		buf.Write(c.cipherWrite.Seal(nil, c.nonceWrite, fixedHeader.Bytes(), nil))
@@ -264,8 +260,7 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 		c.onceWrite = true
 	}
 	if c.cipherWrite == nil {
-		debug.PrintStack()
-		return 0, oops.Wrapf(err, "cipher is not initialized")
+		return 0, fmt.Errorf("cipher is not initialized")
 	}
 	c.seal(buf, b)
 	_, err = c.Conn.Write(buf.Bytes())

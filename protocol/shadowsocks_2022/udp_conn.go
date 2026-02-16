@@ -10,6 +10,8 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/daeuniverse/outbound/ciphers"
@@ -27,7 +29,7 @@ type UdpConn struct {
 	net.Conn
 
 	sessionID [8]byte
-	packetID  uint64
+	packetID  atomic.Uint64
 
 	cipherConf         *ciphers.CipherConf2022
 	blockCipherEncrypt cipher.Block
@@ -36,6 +38,19 @@ type UdpConn struct {
 	pskList [][]byte
 	uPSK    []byte
 	bloom   *disk_bloom.FilterGroup
+
+	replayMu     sync.Mutex
+	replayWindow map[[8]byte]*udpSessionReplayState
+}
+
+const (
+	udpPacketReplayWindowSize = 1024
+	maxTrackedUdpSessions     = 128
+)
+
+type udpSessionReplayState struct {
+	filter   *ciphers.SlidingWindowFilter
+	lastSeen time.Time
 }
 
 func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf2022, blockCipherEncrypt cipher.Block, blockCipherDecrypt cipher.Block, pskList [][]byte, uPSK []byte, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
@@ -47,10 +62,55 @@ func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf2022, blockCipherEncrypt 
 		pskList:            pskList,
 		uPSK:               uPSK,
 		bloom:              bloom,
+		replayWindow:       make(map[[8]byte]*udpSessionReplayState),
 	}
-	// TODO: salt generator?
 	fastrand.Read(u.sessionID[:])
 	return &u, nil
+}
+
+func (c *UdpConn) nextPacketID() uint64 {
+	return c.packetID.Add(1)
+}
+
+func (c *UdpConn) checkAndUpdateReplay(sessionID [8]byte, packetID uint64, now time.Time) bool {
+	c.replayMu.Lock()
+	defer c.replayMu.Unlock()
+	if c.replayWindow == nil {
+		c.replayWindow = make(map[[8]byte]*udpSessionReplayState)
+	}
+
+	for sid, state := range c.replayWindow {
+		if now.Sub(state.lastSeen) > ciphers.SaltStorageDuration {
+			delete(c.replayWindow, sid)
+		}
+	}
+
+	state, ok := c.replayWindow[sessionID]
+	if !ok {
+		if len(c.replayWindow) >= maxTrackedUdpSessions {
+			var oldestSID [8]byte
+			var oldestTS time.Time
+			first := true
+			for sid, item := range c.replayWindow {
+				if first || item.lastSeen.Before(oldestTS) {
+					oldestSID = sid
+					oldestTS = item.lastSeen
+					first = false
+				}
+			}
+			if !first {
+				delete(c.replayWindow, oldestSID)
+			}
+		}
+
+		state = &udpSessionReplayState{
+			filter: ciphers.NewSlidingWindowFilter(udpPacketReplayWindowSize),
+		}
+		c.replayWindow[sessionID] = state
+	}
+
+	state.lastSeen = now
+	return state.filter.CheckAndUpdate(packetID)
 }
 
 func (c *UdpConn) writeIdentityHeader(buf *poolBytes.Buffer, separateHeader []byte) error {
@@ -77,19 +137,14 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	separateHeader := pool.GetBuffer()
 	defer pool.PutBuffer(separateHeader)
 
-	c.packetID++
+	packetID := c.nextPacketID()
 
 	separateHeader.Write(c.sessionID[:])
-	binary.Write(separateHeader, binary.BigEndian, c.packetID)
+	binary.Write(separateHeader, binary.BigEndian, packetID)
 
 	separateHeaderEncrypted := pool.Get(16)
 	defer pool.Put(separateHeaderEncrypted)
 	c.blockCipherEncrypt.Encrypt(separateHeaderEncrypted, separateHeader.Bytes())
-
-	// TODO: DEBUG
-	if len(separateHeaderEncrypted) != 16 {
-		return 0, fmt.Errorf("separate header length is not 16")
-	}
 
 	buf.Write(separateHeaderEncrypted)
 
@@ -148,6 +203,13 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 	}
 
 	c.blockCipherDecrypt.Decrypt(buf[:16], buf[:16])
+	var sessionID [8]byte
+	copy(sessionID[:], buf[:8])
+	packetID := binary.BigEndian.Uint64(buf[8:16])
+	now := time.Now()
+	if !c.checkAndUpdateReplay(sessionID, packetID, now) {
+		return 0, netip.AddrPort{}, protocol.ErrReplayAttack
+	}
 
 	payload := buf[16:n]
 	ciph, err := CreateCipher(c.uPSK, buf[:8], c.cipherConf)
@@ -195,8 +257,8 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 		return 0, netip.AddrPort{}, fmt.Errorf("received unexpected header type: %d", typ)
 	}
 
-	if timestamp.Before(time.Now().Add(-ciphers.TimestampTolerance)) {
-		return 0, netip.AddrPort{}, protocol.ErrReplayAttack
+	if err := validateTimestamp(timestamp, now); err != nil {
+		return 0, netip.AddrPort{}, err
 	}
 
 	// Parse address from decrypted data
