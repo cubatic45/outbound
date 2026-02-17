@@ -120,8 +120,8 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 			}
 		}
 		//log.Warn("salt: %v", hex.EncodeToString(salt))
-		subKey := pool.Get(c.cipherConf.KeyLen)
-		defer pool.Put(subKey)
+		subKey := getSubKey(c.cipherConf.KeyLen)
+		defer putSubKey(subKey)
 		kdf := hkdf.New(
 			sha1.New,
 			c.masterKey,
@@ -217,8 +217,8 @@ func (c *TCPConn) initWriteFromPool(b []byte) (buf []byte, offset int, toWrite [
 	salt := c.sg.Get()
 	copy(buf, salt)
 	pool.Put(salt)
-	subKey := pool.Get(c.cipherConf.KeyLen)
-	defer pool.Put(subKey)
+	subKey := getSubKey(c.cipherConf.KeyLen)
+	defer putSubKey(subKey)
 	kdf := hkdf.New(
 		sha1.New,
 		c.masterKey,

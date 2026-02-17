@@ -122,17 +122,32 @@ func (f *SlidingWindowFilter) setBitInWindow(window []uint64, index uint64) {
 
 func (f *SlidingWindowFilter) shiftWindow(shift uint64) {
 	if shift >= f.windowSize {
+		// Clear all bits in-place
 		for i := range f.window {
 			f.window[i] = 0
 		}
 		return
 	}
 
-	newWindow := make([]uint64, len(f.window))
-	for i := uint64(0); i+shift < f.windowSize; i++ {
-		if f.getBit(i) {
-			f.setBitInWindow(newWindow, i+shift)
+	// Optimized in-place shift to avoid allocation
+	wordShift := int(shift / 64)
+	bitShift := shift % 64
+
+	// Shift right by wordShift positions
+	if wordShift > 0 {
+		for i := len(f.window) - 1; i >= wordShift; i-- {
+			f.window[i] = f.window[i-wordShift]
+		}
+		for i := 0; i < wordShift; i++ {
+			f.window[i] = 0
 		}
 	}
-	copy(f.window, newWindow)
+
+	// Handle remaining bit shift
+	if bitShift > 0 {
+		for i := len(f.window) - 1; i > 0; i-- {
+			f.window[i] = (f.window[i] >> bitShift) | (f.window[i-1] << (64 - bitShift))
+		}
+		f.window[0] = f.window[0] >> bitShift
+	}
 }

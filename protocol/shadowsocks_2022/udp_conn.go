@@ -39,8 +39,8 @@ type UdpConn struct {
 	uPSK    []byte
 	bloom   *disk_bloom.FilterGroup
 
-	replayMu     sync.Mutex
-	replayWindow map[[8]byte]*udpSessionReplayState
+	// Use sync.Map for better read performance in hot path
+	replayWindow sync.Map // map[[8]byte]*udpSessionReplayState
 }
 
 const (
@@ -50,7 +50,7 @@ const (
 
 type udpSessionReplayState struct {
 	filter   *ciphers.SlidingWindowFilter
-	lastSeen time.Time
+	lastSeen atomic.Int64 // Unix nano timestamp
 }
 
 func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf2022, blockCipherEncrypt cipher.Block, blockCipherDecrypt cipher.Block, pskList [][]byte, uPSK []byte, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
@@ -62,7 +62,6 @@ func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf2022, blockCipherEncrypt 
 		pskList:            pskList,
 		uPSK:               uPSK,
 		bloom:              bloom,
-		replayWindow:       make(map[[8]byte]*udpSessionReplayState),
 	}
 	fastrand.Read(u.sessionID[:])
 	return &u, nil
@@ -73,44 +72,77 @@ func (c *UdpConn) nextPacketID() uint64 {
 }
 
 func (c *UdpConn) checkAndUpdateReplay(sessionID [8]byte, packetID uint64, now time.Time) bool {
-	c.replayMu.Lock()
-	defer c.replayMu.Unlock()
-	if c.replayWindow == nil {
-		c.replayWindow = make(map[[8]byte]*udpSessionReplayState)
-	}
+	nowNano := now.UnixNano()
+	expireNano := ciphers.SaltStorageDuration.Nanoseconds()
 
-	for sid, state := range c.replayWindow {
-		if now.Sub(state.lastSeen) > ciphers.SaltStorageDuration {
-			delete(c.replayWindow, sid)
+	// Fast path: try to get existing state
+	if v, ok := c.replayWindow.Load(sessionID); ok {
+		state := v.(*udpSessionReplayState)
+		lastSeen := state.lastSeen.Load()
+		if nowNano-lastSeen > expireNano {
+			// Session expired, try to delete and create new
+			c.replayWindow.CompareAndDelete(sessionID, v)
+		} else {
+			state.lastSeen.Store(nowNano)
+			return state.filter.CheckAndUpdate(packetID)
 		}
 	}
 
-	state, ok := c.replayWindow[sessionID]
-	if !ok {
-		if len(c.replayWindow) >= maxTrackedUdpSessions {
-			var oldestSID [8]byte
-			var oldestTS time.Time
-			first := true
-			for sid, item := range c.replayWindow {
-				if first || item.lastSeen.Before(oldestTS) {
-					oldestSID = sid
-					oldestTS = item.lastSeen
-					first = false
-				}
-			}
-			if !first {
-				delete(c.replayWindow, oldestSID)
-			}
-		}
+	// Periodic cleanup of expired sessions
+	c.cleanupExpiredSessions(nowNano, expireNano)
 
-		state = &udpSessionReplayState{
-			filter: ciphers.NewSlidingWindowFilter(udpPacketReplayWindowSize),
-		}
-		c.replayWindow[sessionID] = state
+	// Try to create new state
+	newState := &udpSessionReplayState{
+		filter: ciphers.NewSlidingWindowFilter(udpPacketReplayWindowSize),
+	}
+	newState.lastSeen.Store(nowNano)
+
+	// Use LoadOrStore for atomic create-or-get
+	actual, loaded := c.replayWindow.LoadOrStore(sessionID, newState)
+	state := actual.(*udpSessionReplayState)
+
+	if loaded {
+		// Another goroutine created it first
+		state.lastSeen.Store(nowNano)
+	} else {
+		// Check if we need to evict oldest session (only for creator)
+		c.evictOldestIfNeeded()
 	}
 
-	state.lastSeen = now
 	return state.filter.CheckAndUpdate(packetID)
+}
+
+// cleanupExpiredSessions removes expired sessions periodically
+func (c *UdpConn) cleanupExpiredSessions(nowNano, expireNano int64) {
+	c.replayWindow.Range(func(key, value interface{}) bool {
+		state := value.(*udpSessionReplayState)
+		if nowNano-state.lastSeen.Load() > expireNano {
+			c.replayWindow.Delete(key)
+		}
+		return true
+	})
+}
+
+// evictOldestIfNeeded evicts the oldest session if we exceed max sessions
+func (c *UdpConn) evictOldestIfNeeded() {
+	var count int
+	var oldestKey [8]byte
+	var oldestNano int64 = ^int64(0) // max int64
+
+	c.replayWindow.Range(func(key, value interface{}) bool {
+		count++
+		state := value.(*udpSessionReplayState)
+		seen := state.lastSeen.Load()
+		if seen < oldestNano {
+			oldestKey = key.([8]byte)
+			oldestNano = seen
+		}
+		return true
+	})
+
+	if count > maxTrackedUdpSessions {
+		c.replayWindow.Delete(oldestKey)
+	}
 }
 
 func (c *UdpConn) writeIdentityHeader(buf *poolBytes.Buffer, separateHeader []byte) error {
