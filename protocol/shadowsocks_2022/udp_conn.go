@@ -192,7 +192,8 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	}
 
 	// Encrypt and send
-	cipher, err := CreateCipher(c.uPSK, separateHeader.Bytes()[:8], c.cipherConf)
+	// Optimized: Use cached cipher for session reuse
+	cipher, err := GetCachedCipher(c.uPSK, separateHeader.Bytes()[:8], c.cipherConf, true)
 	if err != nil {
 		return 0, err
 	}
@@ -244,7 +245,8 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 	}
 
 	payload := buf[16:n]
-	ciph, err := CreateCipher(c.uPSK, buf[:8], c.cipherConf)
+	// Optimized: Use cached cipher for session reuse
+	ciph, err := GetCachedCipher(c.uPSK, buf[:8], c.cipherConf, false)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
