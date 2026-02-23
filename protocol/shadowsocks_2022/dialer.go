@@ -96,7 +96,11 @@ func NewDialer(parentDialer netproxy.Dialer, header protocol.Header) (netproxy.D
 }
 
 func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netproxy.Conn, error) {
-	switch network {
+	magicNetwork, err := netproxy.ParseMagicNetwork(network)
+	if err != nil {
+		return nil, err
+	}
+	switch magicNetwork.Network {
 	case "tcp":
 		addrInfo, err := socks5.AddressFromString(addr)
 		if err != nil {
@@ -124,7 +128,12 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 
 func (d *Dialer) ListenPacket(ctx context.Context, addr string) (netproxy.PacketConn, error) {
 	// Shadowsocks transfer UDP traffic via UDP tunnel.
-	conn, err := d.parentDialer.DialContext(ctx, "udp", d.proxyAddress)
+	magicNetwork, err := netproxy.ParseMagicNetwork(addr)
+	if err != nil {
+		return nil, err
+	}
+	network := magicNetwork.Encode()
+	conn, err := d.parentDialer.DialContext(ctx, network, d.proxyAddress)
 	if err != nil {
 		return nil, err
 	}
