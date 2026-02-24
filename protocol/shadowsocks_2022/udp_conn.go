@@ -10,6 +10,8 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +26,18 @@ import (
 	"github.com/samber/oops"
 	"lukechampine.com/blake3"
 )
+
+// Global option to control multi-PSK UDP optimization
+// Set env var SS2022_UDP_MULTI_PSK_OPTIMIZATION=1 to enable aggressive optimization
+// (send identity header only once, similar to TCP behavior)
+var udpMultiPSKAggressiveOptimization = func() bool {
+	if val := os.Getenv("SS2022_UDP_MULTI_PSK_OPTIMIZATION"); val != "" {
+		if enabled, err := strconv.ParseBool(val); err == nil {
+			return enabled
+		}
+	}
+	return false // Default: conservative mode (send identity header every packet)
+}()
 
 type UdpConn struct {
 	net.Conn
@@ -41,6 +55,14 @@ type UdpConn struct {
 
 	// Use sync.Map for better read performance in hot path
 	replayWindow sync.Map // map[[8]byte]*udpSessionReplayState
+
+	// Multi-PSK optimization: cached pre-computed identity header components
+	// This avoids repeated BLAKE3 hashing and block cipher creation for each UDP packet
+	cachedIdentityComponents [][]byte // Pre-computed identity hashes for each PSK
+	identityHeaderCache      atomic.Value // [][]byte - cached encrypted identity headers (aggressive mode)
+	identityHeaderMutex      sync.Mutex // Protects identityHeaderCache initialization
+	hasMultiPSK              bool // True if len(pskList) > 1
+	identityHeaderSent       atomic.Bool // Track if identity header was sent (aggressive mode)
 }
 
 const (
@@ -62,8 +84,23 @@ func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf2022, blockCipherEncrypt 
 		pskList:            pskList,
 		uPSK:               uPSK,
 		bloom:              bloom,
+		hasMultiPSK:        len(pskList) > 1,
 	}
 	fastrand.Read(u.sessionID[:])
+
+	// Pre-compute identity header components for multi-PSK scenario
+	// This cache stores BLAKE3 hashes of each PSK for fast identity header generation
+	if u.hasMultiPSK {
+		u.cachedIdentityComponents = make([][]byte, len(pskList)-1)
+		for i := 0; i < len(pskList)-1; i++ {
+			hash := blake3.Sum512(pskList[i+1])
+			// Store first aes.BlockSize (16) bytes of the hash
+			component := make([]byte, aes.BlockSize)
+			copy(component, hash[:aes.BlockSize])
+			u.cachedIdentityComponents[i] = component
+		}
+	}
+
 	return &u, nil
 }
 
@@ -146,12 +183,64 @@ func (c *UdpConn) evictOldestIfNeeded() {
 }
 
 func (c *UdpConn) writeIdentityHeader(buf *poolBytes.Buffer, separateHeader []byte) error {
-	for i := 0; i < len(c.pskList)-1; i++ {
+	// Fast path: single PSK - no identity header needed
+	if !c.hasMultiPSK {
+		return nil
+	}
+
+	// Aggressive optimization mode: send identity header only once
+	// This matches TCP behavior and significantly reduces per-packet overhead
+	// Use with caution: requires server-side compatibility
+	if udpMultiPSKAggressiveOptimization {
+		if c.identityHeaderSent.Load() {
+			// Identity header already sent, skip for subsequent packets
+			return nil
+		}
+
+		// Send identity header for the first packet and cache it
+		c.identityHeaderMutex.Lock()
+		defer c.identityHeaderMutex.Unlock()
+
+		// Double-check after acquiring lock
+		if c.identityHeaderSent.Load() {
+			return nil
+		}
+
+		// Generate and cache the identity header
+		var cachedHeader []byte
+		headerBuf := pool.GetBuffer()
+		defer pool.PutBuffer(headerBuf)
+
+		for i := 0; i < len(c.cachedIdentityComponents); i++ {
+			identityHeader := pool.Get(aes.BlockSize)
+			subtle.XORBytes(identityHeader, c.cachedIdentityComponents[i], separateHeader)
+			b, err := c.cipherConf.NewBlockCipher(c.pskList[i])
+			if err != nil {
+				pool.Put(identityHeader)
+				return err
+			}
+			b.Encrypt(identityHeader, identityHeader)
+			headerBuf.Write(identityHeader)
+			pool.Put(identityHeader)
+		}
+
+		// Cache the header for reuse
+		cachedHeader = make([]byte, headerBuf.Len())
+		copy(cachedHeader, headerBuf.Bytes())
+		c.identityHeaderCache.Store(cachedHeader)
+		buf.Write(cachedHeader)
+		c.identityHeaderSent.Store(true)
+		return nil
+	}
+
+	// Conservative mode: optimized multi-PSK with pre-computed hash components
+	// Still sends identity header every packet, but avoids BLAKE3 recomputation
+	for i := 0; i < len(c.cachedIdentityComponents); i++ {
 		identityHeader := pool.Get(aes.BlockSize)
 		defer pool.Put(identityHeader)
 
-		hash := blake3.Sum512(c.pskList[i+1])
-		subtle.XORBytes(identityHeader, hash[:aes.BlockSize], separateHeader)
+		// Use cached hash component instead of recomputing BLAKE3
+		subtle.XORBytes(identityHeader, c.cachedIdentityComponents[i], separateHeader)
 		b, err := c.cipherConf.NewBlockCipher(c.pskList[i])
 		if err != nil {
 			return err
