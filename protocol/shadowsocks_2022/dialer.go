@@ -100,7 +100,12 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 	if err != nil {
 		return nil, err
 	}
-	switch magicNetwork.Network {
+	// Extract base protocol from network string (handles "udp", "udp4", "udp6", "udp4(DNS)", etc.)
+	proto := magicNetwork.Network
+	if len(proto) >= 3 && (proto[0:3] == "tcp" || proto[0:3] == "udp") {
+		proto = proto[0:3]
+	}
+	switch proto {
 	case "tcp":
 		addrInfo, err := socks5.AddressFromString(addr)
 		if err != nil {
