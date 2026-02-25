@@ -118,7 +118,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 		}
 		return NewTCPConn(conn.(net.Conn), d.conf, d.pskList, d.uPSK, d.sg, addrInfo, nil), nil
 	case "udp":
-		conn, err := d.ListenPacket(ctx, d.proxyAddress)
+		conn, err := d.ListenPacket(ctx, network, d.proxyAddress)
 		if err != nil {
 			return nil, err
 		}
@@ -131,14 +131,15 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 	}
 }
 
-func (d *Dialer) ListenPacket(ctx context.Context, addr string) (netproxy.PacketConn, error) {
-	// Shadowsocks transfer UDP traffic via UDP tunnel.
+func (d *Dialer) ListenPacket(ctx context.Context, network string, addr string) (netproxy.PacketConn, error) {
 	// Parse magic network to preserve Mark and Mptcp settings
-	magicNetwork, err := netproxy.ParseMagicNetwork(addr)
+	magicNetwork, err := netproxy.ParseMagicNetwork(network)
 	if err != nil {
 		return nil, err
 	}
-	network := magicNetwork.Encode()
+	// Shadowsocks transfer UDP traffic via UDP tunnel.
+	magicNetwork.Network = "udp"
+	network = magicNetwork.Encode()
 	conn, err := d.parentDialer.DialContext(ctx, network, d.proxyAddress)
 	if err != nil {
 		return nil, err
