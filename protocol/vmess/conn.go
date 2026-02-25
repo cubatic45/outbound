@@ -1,7 +1,6 @@
 package vmess
 
 import (
-	"bytes"
 	"crypto/cipher"
 	"crypto/sha256"
 	"encoding/binary"
@@ -13,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/daeuniverse/outbound/common"
+	"github.com/daeuniverse/outbound/common/iout"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
@@ -114,9 +114,6 @@ func (c *Conn) sealFromPool(b []byte) (data []byte) {
 	return data
 }
 
-// writeStream splits mb into multiple FIXED size (payloadSize) chunks.
-// Then seal the chunks and write separately.
-// If the sum size of mb less than one payloadSize, seal and write it directly.
 func (c *Conn) writeStream(b []byte, preWrite []byte) (n int, err error) {
 	payloadSize, numChunks := c.chunks(len(b))
 	var start = 0
@@ -124,7 +121,7 @@ func (c *Conn) writeStream(b []byte, preWrite []byte) (n int, err error) {
 		start++
 		data := c.sealFromPool(b[n:common.Min(n+payloadSize, len(b))])
 		defer pool.Put(data)
-		if _, err = c.Conn.Write(bytes.Join([][]byte{preWrite, data}, nil)); err != nil {
+		if _, err = iout.MultiWrite(c.Conn, preWrite, data); err != nil {
 			return 0, err
 		}
 		n += payloadSize
@@ -143,12 +140,11 @@ func (c *Conn) writeStream(b []byte, preWrite []byte) (n int, err error) {
 	return n, nil
 }
 
-// writePacket simply seal every buffer of mb and write.
 func (c *Conn) writePacket(b []byte, preWrite []byte) (n int, err error) {
 	data := c.sealFromPool(b)
 	defer pool.Put(data)
 	if preWrite != nil {
-		if _, err = c.Conn.Write(bytes.Join([][]byte{preWrite, data}, nil)); err != nil {
+		if _, err = iout.MultiWrite(c.Conn, preWrite, data); err != nil {
 			return 0, err
 		}
 	} else {

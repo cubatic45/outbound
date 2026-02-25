@@ -53,16 +53,15 @@ type UdpConn struct {
 	uPSK    []byte
 	bloom   *disk_bloom.FilterGroup
 
-	// Use sync.Map for better read performance in hot path
-	replayWindow sync.Map // map[[8]byte]*udpSessionReplayState
+	replayWindow sync.Map
 
-	// Multi-PSK optimization: cached pre-computed identity header components
-	// This avoids repeated BLAKE3 hashing and block cipher creation for each UDP packet
-	cachedIdentityComponents [][]byte // Pre-computed identity hashes for each PSK
-	identityHeaderCache      atomic.Value // [][]byte - cached encrypted identity headers (aggressive mode)
-	identityHeaderMutex      sync.Mutex // Protects identityHeaderCache initialization
-	hasMultiPSK              bool // True if len(pskList) > 1
-	identityHeaderSent       atomic.Bool // Track if identity header was sent (aggressive mode)
+	cachedIdentityComponents [][]byte
+	identityHeaderCache      atomic.Value
+	identityHeaderMutex      sync.Mutex
+	hasMultiPSK              bool
+	identityHeaderSent       atomic.Bool
+
+	cleanupCounter atomic.Int64
 }
 
 const (
@@ -112,12 +111,10 @@ func (c *UdpConn) checkAndUpdateReplay(sessionID [8]byte, packetID uint64, now t
 	nowNano := now.UnixNano()
 	expireNano := ciphers.SaltStorageDuration.Nanoseconds()
 
-	// Fast path: try to get existing state
 	if v, ok := c.replayWindow.Load(sessionID); ok {
 		state := v.(*udpSessionReplayState)
 		lastSeen := state.lastSeen.Load()
 		if nowNano-lastSeen > expireNano {
-			// Session expired, try to delete and create new
 			c.replayWindow.CompareAndDelete(sessionID, v)
 		} else {
 			state.lastSeen.Store(nowNano)
@@ -125,31 +122,29 @@ func (c *UdpConn) checkAndUpdateReplay(sessionID [8]byte, packetID uint64, now t
 		}
 	}
 
-	// Periodic cleanup of expired sessions
-	c.cleanupExpiredSessions(nowNano, expireNano)
+	if c.cleanupCounter.Add(1)%cleanupInterval == 0 {
+		go c.cleanupExpiredSessions(nowNano, expireNano)
+	}
 
-	// Try to create new state
 	newState := &udpSessionReplayState{
 		filter: ciphers.NewSlidingWindowFilter(udpPacketReplayWindowSize),
 	}
 	newState.lastSeen.Store(nowNano)
 
-	// Use LoadOrStore for atomic create-or-get
 	actual, loaded := c.replayWindow.LoadOrStore(sessionID, newState)
 	state := actual.(*udpSessionReplayState)
 
 	if loaded {
-		// Another goroutine created it first
 		state.lastSeen.Store(nowNano)
 	} else {
-		// Check if we need to evict oldest session (only for creator)
 		c.evictOldestIfNeeded()
 	}
 
 	return state.filter.CheckAndUpdate(packetID)
 }
 
-// cleanupExpiredSessions removes expired sessions periodically
+const cleanupInterval = 1000
+
 func (c *UdpConn) cleanupExpiredSessions(nowNano, expireNano int64) {
 	c.replayWindow.Range(func(key, value interface{}) bool {
 		state := value.(*udpSessionReplayState)

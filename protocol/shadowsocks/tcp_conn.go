@@ -28,6 +28,9 @@ const (
 var (
 	ErrFailInitCipher     = fmt.Errorf("fail to initiate cipher")
 	ShadowsocksReusedInfo = []byte("ss-subkey")
+
+	fnv32aPool = sync.Pool{New: func() any { return fnv.New32a() }}
+	fnv32Pool  = sync.Pool{New: func() any { return fnv.New32() }}
 )
 
 type TCPConn struct {
@@ -336,10 +339,13 @@ func CalcPaddingLen(masterKey []byte, bodyWithoutAddr []byte, req bool) (length 
 	}
 	var h hash.Hash32
 	if req {
-		h = fnv.New32a()
+		h = fnv32aPool.Get().(hash.Hash32)
+		defer fnv32aPool.Put(h)
 	} else {
-		h = fnv.New32()
+		h = fnv32Pool.Get().(hash.Hash32)
+		defer fnv32Pool.Put(h)
 	}
+	h.Reset()
 	h.Write(masterKey)
 	h.Write(bodyWithoutAddr)
 	return int(h.Sum32()) % maxPadding

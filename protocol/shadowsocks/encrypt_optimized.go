@@ -6,23 +6,24 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/daeuniverse/outbound/ciphers"
+	"github.com/daeuniverse/outbound/pkg/zeroalloc/key"
 	"github.com/daeuniverse/outbound/pool"
 	"golang.org/x/crypto/hkdf"
 )
 
-// Optimized: UDP cipher cache for session reuse
 type udpCacheEntry struct {
 	cipher    cipher.AEAD
-	timestamp time.Time
+	timestamp atomic.Int64
 }
 
 var (
 	udpEncryptCache sync.Map // cacheKey -> *udpCacheEntry
 	udpDecryptCache sync.Map // cacheKey -> *udpCacheEntry
-	
+
 	// Background cleanup
 	udpCacheCleanupInterval = 5 * time.Minute
 	udpCacheMaxAge          = 10 * time.Minute
@@ -36,24 +37,23 @@ func init() {
 func udpCacheCleanup() {
 	ticker := time.NewTicker(udpCacheCleanupInterval)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
-		now := time.Now()
-		
-		// Clean encrypt cache
+		nowNano := time.Now().UnixNano()
+		maxAgeNano := udpCacheMaxAge.Nanoseconds()
+
 		udpEncryptCache.Range(func(key, value interface{}) bool {
 			if entry, ok := value.(*udpCacheEntry); ok {
-				if now.Sub(entry.timestamp) > udpCacheMaxAge {
+				if nowNano-entry.timestamp.Load() > maxAgeNano {
 					udpEncryptCache.Delete(key)
 				}
 			}
 			return true
 		})
-		
-		// Clean decrypt cache
+
 		udpDecryptCache.Range(func(key, value interface{}) bool {
 			if entry, ok := value.(*udpCacheEntry); ok {
-				if now.Sub(entry.timestamp) > udpCacheMaxAge {
+				if nowNano-entry.timestamp.Load() > maxAgeNano {
 					udpDecryptCache.Delete(key)
 				}
 			}
@@ -64,27 +64,22 @@ func udpCacheCleanup() {
 
 // generateCacheKey generates a cache key from salt and masterKey
 func generateCacheKey(salt []byte, masterKey []byte) string {
-	// Simple concatenation for cache key
-	// In production, you might want to use a hash to reduce memory
-	key := make([]byte, len(salt)+len(masterKey))
-	copy(key, salt)
-	copy(key[len(salt):], masterKey)
-	return string(key)
+	return key.ConcatKey(salt, masterKey)
 }
 
 // Optimized: EncryptUDPFromPool with cipher cache
 func EncryptUDPFromPoolOptimized(key *Key, b []byte, salt []byte, reusedInfo []byte) (shadowBytes pool.PB, err error) {
 	cacheKey := generateCacheKey(salt, key.MasterKey)
-	
+
 	// Try to get cipher from cache
 	var ciph cipher.AEAD
 	if cached, ok := udpEncryptCache.Load(cacheKey); ok {
 		if entry, ok := cached.(*udpCacheEntry); ok {
 			ciph = entry.cipher
-			entry.timestamp = time.Now() // Update timestamp
+			entry.timestamp.Store(time.Now().UnixNano())
 		}
 	}
-	
+
 	// If not in cache, create new cipher
 	if ciph == nil {
 		var buf = pool.Get(key.CipherConf.SaltLen + len(b) + key.CipherConf.TagLen)
@@ -94,33 +89,34 @@ func EncryptUDPFromPoolOptimized(key *Key, b []byte, salt []byte, reusedInfo []b
 			}
 		}()
 		copy(buf, salt)
-		
+
 		subKey := getSubKey(key.CipherConf.KeyLen)
 		defer putSubKey(subKey)
-		
+
 		kdf := hkdf.New(sha1.New, key.MasterKey, buf[:key.CipherConf.SaltLen], reusedInfo)
-		
+
 		_, err = io.ReadFull(kdf, subKey)
 		if err != nil {
 			return nil, err
 		}
-		
+
 		ciph, err = key.CipherConf.NewCipher(subKey)
 		if err != nil {
 			return nil, err
 		}
-		
+
 		// Cache the cipher
-		udpEncryptCache.Store(cacheKey, &udpCacheEntry{
-			cipher:    ciph,
-			timestamp: time.Now(),
-		})
-		
+		entry := &udpCacheEntry{
+			cipher: ciph,
+		}
+		entry.timestamp.Store(time.Now().UnixNano())
+		udpEncryptCache.Store(cacheKey, entry)
+
 		// Encrypt to buf
 		_ = ciph.Seal(buf[key.CipherConf.SaltLen:key.CipherConf.SaltLen], ciphers.ZeroNonce[:key.CipherConf.NonceLen], b, nil)
 		return buf, nil
 	}
-	
+
 	// Cipher from cache, encrypt directly
 	var buf = pool.Get(key.CipherConf.SaltLen + len(b) + key.CipherConf.TagLen)
 	defer func() {
@@ -144,47 +140,44 @@ func DecryptUDPFromPoolOptimized(key *Key, shadowBytes []byte, reusedInfo []byte
 	return buf[:n], nil
 }
 
-// Optimized: DecryptUDP with cipher cache
 func DecryptUDPOptimized(writeTo []byte, key *Key, shadowBytes []byte, reusedInfo []byte) (n int, err error) {
 	if len(shadowBytes) < key.CipherConf.SaltLen {
 		return 0, fmt.Errorf("short length to decrypt")
 	}
-	
+
 	cacheKey := generateCacheKey(shadowBytes[:key.CipherConf.SaltLen], key.MasterKey)
-	
-	// Try to get cipher from cache
+
 	var ciph cipher.AEAD
 	if cached, ok := udpDecryptCache.Load(cacheKey); ok {
 		if entry, ok := cached.(*udpCacheEntry); ok {
 			ciph = entry.cipher
-			entry.timestamp = time.Now() // Update timestamp
+			entry.timestamp.Store(time.Now().UnixNano())
 		}
 	}
-	
-	// If not in cache, create new cipher
+
 	if ciph == nil {
 		subKey := getSubKey(key.CipherConf.KeyLen)
 		defer putSubKey(subKey)
-		
+
 		kdf := hkdf.New(sha1.New, key.MasterKey, shadowBytes[:key.CipherConf.SaltLen], reusedInfo)
-		
+
 		_, err = io.ReadFull(kdf, subKey)
 		if err != nil {
 			return 0, err
 		}
-		
+
 		ciph, err = key.CipherConf.NewCipher(subKey)
 		if err != nil {
 			return 0, err
 		}
-		
-		// Cache the cipher
-		udpDecryptCache.Store(cacheKey, &udpCacheEntry{
-			cipher:    ciph,
-			timestamp: time.Now(),
-		})
+
+		entry := &udpCacheEntry{
+			cipher: ciph,
+		}
+		entry.timestamp.Store(time.Now().UnixNano())
+		udpDecryptCache.Store(cacheKey, entry)
 	}
-	
+
 	writeTo, err = ciph.Open(writeTo[:0], ciphers.ZeroNonce[:key.CipherConf.NonceLen], shadowBytes[key.CipherConf.SaltLen:], nil)
 	if err != nil {
 		return 0, err
