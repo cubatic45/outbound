@@ -31,3 +31,24 @@ const (
 	QUIC UdpRelayMode = iota
 	NATIVE
 )
+
+// IsTemporaryError checks if an error is temporary and should not close the connection
+func IsTemporaryError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Context timeout/cancelled are temporary
+	if errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled) {
+		return true
+	}
+
+	// Net temporary errors
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Temporary() {
+		return true
+	}
+
+	return false
+}

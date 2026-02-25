@@ -353,8 +353,11 @@ func (io *udpIOImpl) ReceiveMessage() (*protocol.UDPMessage, error) {
 	for {
 		msg, err := io.Conn.ReceiveDatagram(context.Background())
 		if err != nil {
-			// Connection error, this will stop the session manager
-			return nil, err
+			// Only stop on fatal errors, continue on temporary errors (timeout, etc)
+			if !isTemporaryError(err) {
+				return nil, err
+			}
+			continue
 		}
 		udpMsg, err := protocol.ParseUDPMessage(msg)
 		if err != nil {
@@ -363,6 +366,24 @@ func (io *udpIOImpl) ReceiveMessage() (*protocol.UDPMessage, error) {
 		}
 		return udpMsg, nil
 	}
+}
+
+// isTemporaryError checks if an error is temporary and should not stop the receiver
+func isTemporaryError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Context timeout/cancelled are temporary
+	if errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled) {
+		return true
+	}
+	// Net temporary errors
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Temporary() {
+		return true
+	}
+	return false
 }
 
 func (io *udpIOImpl) SendMessage(buf []byte, msg *protocol.UDPMessage) error {
