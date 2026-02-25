@@ -9,7 +9,7 @@ import (
 
 	rand "github.com/daeuniverse/outbound/pkg/fastrand"
 
-	"github.com/daeuniverse/quic-go"
+	"github.com/olicesx/quic-go"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	coreErrs "github.com/daeuniverse/outbound/protocol/hysteria2/errors"

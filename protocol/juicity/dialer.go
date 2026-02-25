@@ -13,7 +13,7 @@ import (
 	"github.com/daeuniverse/outbound/protocol/shadowsocks"
 	"github.com/daeuniverse/outbound/protocol/trojanc"
 	"github.com/daeuniverse/outbound/protocol/tuic/common"
-	"github.com/daeuniverse/quic-go"
+	"github.com/olicesx/quic-go"
 	"github.com/google/uuid"
 )
 

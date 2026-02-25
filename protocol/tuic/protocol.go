@@ -9,7 +9,7 @@ import (
 	"strconv"
 
 	"github.com/daeuniverse/outbound/protocol"
-	"github.com/daeuniverse/quic-go"
+	"github.com/olicesx/quic-go"
 	"github.com/google/uuid"
 )
 
