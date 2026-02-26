@@ -13,7 +13,7 @@ require (
 	github.com/gorilla/websocket v1.5.0
 	github.com/json-iterator/go v1.1.12
 	github.com/mzz2017/disk-bloom v1.0.1
-	github.com/olicesx/quic-go v0.0.0-20260225054405-33005db9cba0
+	github.com/olicesx/quic-go v0.0.0-20260226044315-bb65418d151a
 	github.com/refraction-networking/utls v1.8.2
 	github.com/samber/oops v1.19.4
 	github.com/seiflotfy/cuckoofilter v0.0.0-20220411075957-e3b120b3f5fb
