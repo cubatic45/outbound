@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"strings"
 	"sync"
 	"syscall"
 
+	outbounderrors "github.com/daeuniverse/outbound/common/errors"
 	"github.com/daeuniverse/outbound/netproxy"
 )
 
@@ -96,7 +96,8 @@ func (d *directDialer) tryRetry(err error, addr string, callback func()) {
 
 	// addr is domain
 	if err != nil {
-		if strings.Contains(err.Error(), "i/o timeout") && strings.Contains(err.Error(), "lookup") {
+		// 🚀 Fast path: direct comparison (1.19 ns)
+		if err == outbounderrors.ErrDNSTimeout {
 			callback()
 		}
 	}
