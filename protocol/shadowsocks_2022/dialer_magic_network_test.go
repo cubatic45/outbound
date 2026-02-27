@@ -10,10 +10,10 @@ import (
 // TestMagicNetworkParsing tests that ParseMagicNetwork handles various network formats
 func TestMagicNetworkParsing(t *testing.T) {
 	tests := []struct {
-		name           string
-		network        string
-		expectNetwork  string
-		expectSuccess  bool
+		name          string
+		network       string
+		expectNetwork string
+		expectSuccess bool
 	}{
 		{
 			name:          "plain tcp",

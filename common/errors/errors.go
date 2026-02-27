@@ -24,11 +24,11 @@ var (
 	// DNS Errors
 	ErrDNSTimeout          = errors.New("i/o timeout on DNS lookup")
 	ErrDNSTemporaryFailure = errors.New("temporary DNS failure")
-	
+
 	// Stream Errors
-	ErrStreamExhausted  = errors.New("too many open streams")
-	ErrClientClosing    = errors.New("client closed")
-	ErrOperationHold    = errors.New("hold on")
+	ErrStreamExhausted = errors.New("too many open streams")
+	ErrClientClosing   = errors.New("client closed")
+	ErrOperationHold   = errors.New("hold on")
 )
 
 // ============================================================================
@@ -38,7 +38,8 @@ var (
 // IsDNSTimeout checks if the error is a DNS timeout.
 //
 // Best Practice: Use direct comparison for best performance (1.19 ns/op):
-//   if err == ErrDNSTimeout { ... }
+//
+//	if err == ErrDNSTimeout { ... }
 //
 // This function provides compatibility with wrapped errors.
 // Performance: Direct comparison path (1.19 ns), wrapped error path (~47 ns)
@@ -98,7 +99,8 @@ func IsDNSTemporaryFailure(err error) bool {
 // IsStreamExhausted checks if the error indicates no more streams available.
 //
 // Best Practice: Use direct comparison for best performance (1.19 ns/op):
-//   if err == ErrStreamExhausted { ... }
+//
+//	if err == ErrStreamExhausted { ... }
 //
 // Performance: Direct comparison path (1.19 ns), other paths (~47 ns)
 func IsStreamExhausted(err error) bool {
@@ -118,7 +120,8 @@ func IsStreamExhausted(err error) bool {
 // IsClientClosing checks if the error indicates the client is closing.
 //
 // Best Practice: Use direct comparison for best performance (1.19 ns/op):
-//   if err == ErrClientClosing { ... }
+//
+//	if err == ErrClientClosing { ... }
 func IsClientClosing(err error) bool {
 	if err == nil {
 		return false
@@ -136,7 +139,8 @@ func IsClientClosing(err error) bool {
 // ShouldRetryStreamOperation checks if a stream operation should be retried.
 //
 // Best Practice: Use direct comparison for best performance (1.19 ns/op):
-//   if err == ErrStreamExhausted || err == ErrOperationHold { ... }
+//
+//	if err == ErrStreamExhausted || err == ErrOperationHold { ... }
 //
 // Performance: Direct comparison path (1.19 ns per check), other paths (~47 ns)
 func ShouldRetryStreamOperation(err error) bool {

@@ -243,7 +243,7 @@ func TestShouldRetryStreamOperation(t *testing.T) {
 
 func BenchmarkIsDNSTimeout_StringMatch(b *testing.B) {
 	err := fmt.Errorf("lookup example.com on 127.0.0.53:53: i/o timeout")
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// Old approach: string matching
@@ -254,7 +254,7 @@ func BenchmarkIsDNSTimeout_StringMatch(b *testing.B) {
 
 func BenchmarkIsDNSTimeout_TypeSafe(b *testing.B) {
 	err := fmt.Errorf("lookup example.com on 127.0.0.53:53: i/o timeout")
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// New approach: type-safe check
@@ -264,7 +264,7 @@ func BenchmarkIsDNSTimeout_TypeSafe(b *testing.B) {
 
 func BenchmarkIsDNSTimeout_TypeSafeWrapped(b *testing.B) {
 	err := fmt.Errorf("operation failed: %w", ErrDNSTimeout)
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = IsDNSTimeout(err)
@@ -273,7 +273,7 @@ func BenchmarkIsDNSTimeout_TypeSafeWrapped(b *testing.B) {
 
 func BenchmarkIsStreamExhausted_StringMatch(b *testing.B) {
 	err := errors.New("too many open streams")
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// Old approach: string matching
@@ -283,7 +283,7 @@ func BenchmarkIsStreamExhausted_StringMatch(b *testing.B) {
 
 func BenchmarkIsStreamExhausted_TypeSafe(b *testing.B) {
 	err := errors.New("too many open streams")
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// New approach: type-safe check
@@ -293,7 +293,7 @@ func BenchmarkIsStreamExhausted_TypeSafe(b *testing.B) {
 
 func BenchmarkShouldRetryStreamOperation_Complex(b *testing.B) {
 	err := errors.New("too many open streams")
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// Old approach: complex string matching
@@ -306,7 +306,7 @@ func BenchmarkShouldRetryStreamOperation_Complex(b *testing.B) {
 
 func BenchmarkShouldRetryStreamOperation_TypeSafe(b *testing.B) {
 	err := errors.New("too many open streams")
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// New approach: type-safe check

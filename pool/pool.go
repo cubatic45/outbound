@@ -72,7 +72,6 @@ func GetMustBigger(size int) PB {
 	return make([]byte, size)
 }
 
-// GetZero returns buffer and set all the values to 0
 func GetZero(size int) []byte {
 	b := Get(size)
 	for i := range b {
@@ -81,7 +80,6 @@ func GetZero(size int) []byte {
 	return b
 }
 
-// Put puts a buffer into pool.
 func Put(buf []byte) {
 	if size := cap(buf); size >= 1 && size <= maxsize {
 		i := GetClosestN(size)

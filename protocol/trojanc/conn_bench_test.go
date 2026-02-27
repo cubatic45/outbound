@@ -7,11 +7,11 @@ import (
 	"testing"
 )
 
-// BenchmarkPasswordHashBaseline 基准测试：当前实现的密码哈希计算
+// BenchmarkPasswordHashBaseline tests the current password hash implementation
 func BenchmarkPasswordHashBaseline(b *testing.B) {
 	password := "test-password-12345"
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		hash := sha256.New224()
 		hash.Write([]byte(password))
@@ -21,20 +21,20 @@ func BenchmarkPasswordHashBaseline(b *testing.B) {
 	}
 }
 
-// BenchmarkPasswordHashCached 基准测试：使用缓存的密码哈希
+// BenchmarkPasswordHashCached tests using cached password hash
 func BenchmarkPasswordHashCached(b *testing.B) {
 	password := "test-password-12345"
 	cache := make(map[string][56]byte)
-	
-	// 预计算
+
+	// Pre-compute
 	hash := sha256.New224()
 	hash.Write([]byte(password))
 	var result [56]byte
 	hex.Encode(result[:], hash.Sum(nil))
 	cache[password] = result
-	
+
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		if cached, ok := cache[password]; ok {
 			_ = cached
@@ -42,20 +42,20 @@ func BenchmarkPasswordHashCached(b *testing.B) {
 	}
 }
 
-// BenchmarkPasswordHashSyncMap 基准测试：使用 sync.Map 缓存
+// BenchmarkPasswordHashSyncMap tests using sync.Map for caching
 func BenchmarkPasswordHashSyncMap(b *testing.B) {
 	password := "test-password-12345"
 	var cache sync.Map
-	
+
 	// 预计算
 	hash := sha256.New224()
 	hash.Write([]byte(password))
 	var result [56]byte
 	hex.Encode(result[:], hash.Sum(nil))
 	cache.Store(password, result)
-	
+
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		if cached, ok := cache.Load(password); ok {
 			_ = cached.([56]byte)
@@ -63,10 +63,10 @@ func BenchmarkPasswordHashSyncMap(b *testing.B) {
 	}
 }
 
-// BenchmarkNewConnComparison 对比测试：优化前后的 NewConn 性能差异
+// BenchmarkNewConnComparison compares NewConn performance before and after optimization
 func BenchmarkNewConnComparison(b *testing.B) {
 	password := "test-password-12345"
-	
+
 	b.Run("Original", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -78,11 +78,11 @@ func BenchmarkNewConnComparison(b *testing.B) {
 			_ = pass
 		}
 	})
-	
+
 	b.Run("OptimizedCached", func(b *testing.B) {
 		// 预热缓存
 		_ = getPasswordHash(password)
-		
+
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			// 优化后：使用缓存
@@ -92,16 +92,16 @@ func BenchmarkNewConnComparison(b *testing.B) {
 	})
 }
 
-// BenchmarkMultiplePasswords 基准测试：多个不同密码的场景
+// BenchmarkMultiplePasswords tests scenarios with multiple different passwords
 func BenchmarkMultiplePasswords(b *testing.B) {
 	passwords := []string{
 		"password1",
-		"password2", 
+		"password2",
 		"password3",
 		"password4",
 		"password5",
 	}
-	
+
 	b.Run("Baseline", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -113,19 +113,19 @@ func BenchmarkMultiplePasswords(b *testing.B) {
 			_ = result
 		}
 	})
-	
+
 	b.Run("SyncMap", func(b *testing.B) {
 		var cache sync.Map
-		
+
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			password := passwords[i%len(passwords)]
-			
+
 			if cached, ok := cache.Load(password); ok {
 				_ = cached.([56]byte)
 				continue
 			}
-			
+
 			hash := sha256.New224()
 			hash.Write([]byte(password))
 			var result [56]byte

@@ -16,7 +16,7 @@ import (
 // [LEGACY] Global switch for UDP cipher cache optimization (kept for reference):
 // This optimization is now always enabled for 5x+ performance improvement.
 // var enableUDPCipherCache int32 = 1 // enabled by default
-// 
+//
 // func EnableUDPCipherCache(enable bool) {
 //     if enable {
 //         atomic.StoreInt32(&enableUDPCipherCache, 1)
@@ -24,7 +24,7 @@ import (
 //         atomic.StoreInt32(&enableUDPCipherCache, 0)
 //     }
 // }
-// 
+//
 // func isUDPCipherCacheEnabled() bool {
 //     return atomic.LoadInt32(&enableUDPCipherCache) == 1
 // }

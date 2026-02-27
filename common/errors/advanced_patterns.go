@@ -42,8 +42,8 @@ func IsStreamExhaustedFast(err error) bool {
 // DNSError is a custom error type for DNS-related errors.
 // This allows fast type checking while carrying additional context.
 type DNSError struct {
-	Err       error
-	IsTimeout bool
+	Err         error
+	IsTimeout   bool
 	IsTemporary bool
 }
 
@@ -75,13 +75,13 @@ func IsDNSTimeoutFast(err error) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	// Fast path: type assertion
 	var dnsErr *DNSError
 	if errors.As(err, &dnsErr) {
 		return dnsErr.IsTimeout
 	}
-	
+
 	// Fallback: string matching for backward compatibility
 	return contains(err.Error(), "i/o timeout") && contains(err.Error(), "lookup")
 }
@@ -98,8 +98,8 @@ type RetriableError interface {
 
 // StreamError implements RetriableError for stream-related errors.
 type StreamError struct {
-	Err          error
-	isRetriable  bool  // Renamed to avoid conflict with method
+	Err         error
+	isRetriable bool // Renamed to avoid conflict with method
 }
 
 func (e *StreamError) Error() string {
@@ -125,18 +125,18 @@ func ShouldRetryStreamOperationFast(err error) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	// Fast path: check for RetriableError interface
 	var retriableErr RetriableError
 	if errors.As(err, &retriableErr) {
 		return retriableErr.IsRetriable()
 	}
-	
+
 	// Fallback: check known error types
 	if err == ErrStreamExhausted {
 		return true
 	}
-	
+
 	// Fallback: string matching
 	errStr := err.Error()
 	return contains(errStr, "too many open streams") || contains(errStr, "hold on")
@@ -151,8 +151,8 @@ func ShouldRetryStreamOperationFast(err error) bool {
 type ErrorFlags uint8
 
 const (
-	FlagNone     ErrorFlags = 0
-	FlagTimeout  ErrorFlags = 1 << iota
+	FlagNone    ErrorFlags = 0
+	FlagTimeout ErrorFlags = 1 << iota
 	FlagTemporary
 	FlagRetriable
 	FlagFatal
@@ -205,13 +205,13 @@ func IsDNSTimeoutWithFlags(err error) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	// Fast path: check for FlaggedError with timeout flag
 	var flaggedErr *FlaggedError
 	if errors.As(err, &flaggedErr) {
 		return flaggedErr.IsTimeout() && contains(flaggedErr.Error(), "lookup")
 	}
-	
+
 	// Fallback: standard checks
 	return IsDNSTimeoutFast(err)
 }
@@ -223,7 +223,7 @@ func IsDNSTimeoutWithFlags(err error) bool {
 // CachedStringError caches the Error() string result for fast comparison.
 // Useful when the same error is checked multiple times.
 type CachedStringError struct {
-	err        error
+	err       error
 	cachedMsg string
 }
 
@@ -245,8 +245,8 @@ func (e *CachedStringError) Unwrap() error {
 // Use case: When the same error is checked multiple times
 func IsDNSTimeoutCached(err error) bool {
 	if cachedErr, ok := err.(*CachedStringError); ok {
-		return contains(cachedErr.Error(), "i/o timeout") && 
-		       contains(cachedErr.Error(), "lookup")
+		return contains(cachedErr.Error(), "i/o timeout") &&
+			contains(cachedErr.Error(), "lookup")
 	}
 	return IsDNSTimeoutFast(err)
 }
@@ -268,30 +268,30 @@ func IsDNSTimeoutHybrid(err error) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	// Fast path: sentinel error (direct comparison)
 	if err == ErrDNSTimeout {
 		return true
 	}
-	
+
 	// Medium path: custom error type (type assertion)
 	var dnsErr *DNSError
 	if errors.As(err, &dnsErr) {
 		return dnsErr.IsTimeout
 	}
-	
+
 	// Medium path: flagged error (bit operation)
 	var flaggedErr *FlaggedError
 	if errors.As(err, &flaggedErr) {
 		return flaggedErr.IsTimeout() && contains(flaggedErr.Error(), "lookup")
 	}
-	
+
 	// Slow path: net.Error interface check
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return contains(err.Error(), "lookup")
 	}
-	
+
 	// Fallback: string matching
 	errStr := err.Error()
 	return contains(errStr, "i/o timeout") && contains(errStr, "lookup")

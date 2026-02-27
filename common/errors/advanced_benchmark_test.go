@@ -17,7 +17,7 @@ import (
 
 func BenchmarkMethod_DirectComparison(b *testing.B) {
 	err := ErrStreamExhausted
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = err == ErrStreamExhausted
@@ -26,7 +26,7 @@ func BenchmarkMethod_DirectComparison(b *testing.B) {
 
 func BenchmarkMethod_TypeAssertion(b *testing.B) {
 	err := &DNSError{Err: errors.New("timeout"), IsTimeout: true}
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		var dnsErr *DNSError
@@ -36,7 +36,7 @@ func BenchmarkMethod_TypeAssertion(b *testing.B) {
 
 func BenchmarkMethod_StringMatching(b *testing.B) {
 	err := errors.New("lookup example.com: i/o timeout")
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		errStr := err.Error()
@@ -51,7 +51,7 @@ func BenchmarkMethod_StringMatching(b *testing.B) {
 func BenchmarkHybrid_SentinelPath(b *testing.B) {
 	// Test the fast path: sentinel error
 	err := ErrDNSTimeout
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = IsDNSTimeoutHybrid(err)
@@ -61,7 +61,7 @@ func BenchmarkHybrid_SentinelPath(b *testing.B) {
 func BenchmarkHybrid_CustomTypePath(b *testing.B) {
 	// Test the medium path: custom error type
 	err := &DNSError{Err: errors.New("timeout"), IsTimeout: true}
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = IsDNSTimeoutHybrid(err)
@@ -71,7 +71,7 @@ func BenchmarkHybrid_CustomTypePath(b *testing.B) {
 func BenchmarkHybrid_StringPath(b *testing.B) {
 	// Test the slow path: string matching
 	err := errors.New("lookup example.com: i/o timeout")
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = IsDNSTimeoutHybrid(err)
@@ -84,7 +84,7 @@ func BenchmarkHybrid_StringPath(b *testing.B) {
 
 func BenchmarkBitFlags_HasFlag(b *testing.B) {
 	err := NewDNSTimeoutFlagged(errors.New("timeout"))
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		var flaggedErr *FlaggedError
@@ -96,7 +96,7 @@ func BenchmarkBitFlags_HasFlag(b *testing.B) {
 
 func BenchmarkBitFlags_IsTimeout(b *testing.B) {
 	err := NewDNSTimeoutFlagged(errors.New("timeout"))
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = IsDNSTimeoutWithFlags(err)
@@ -109,7 +109,7 @@ func BenchmarkBitFlags_IsTimeout(b *testing.B) {
 
 func BenchmarkInterfaceMethod_Retriable(b *testing.B) {
 	err := &StreamError{Err: errors.New("stream exhausted"), isRetriable: true}
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		var retriableErr RetriableError
@@ -121,7 +121,7 @@ func BenchmarkInterfaceMethod_Retriable(b *testing.B) {
 
 func BenchmarkInterfaceMethod_ShouldRetry(b *testing.B) {
 	err := &StreamError{Err: errors.New("stream exhausted"), isRetriable: true}
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = ShouldRetryStreamOperationFast(err)
@@ -135,7 +135,7 @@ func BenchmarkInterfaceMethod_ShouldRetry(b *testing.B) {
 // Simulates checking multiple error properties
 func BenchmarkMultipleChecks_StringMatching(b *testing.B) {
 	err := errors.New("lookup example.com: i/o timeout")
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		errStr := err.Error()
@@ -151,7 +151,7 @@ func BenchmarkMultipleChecks_BitFlags(b *testing.B) {
 		Err:   errors.New("lookup example.com: i/o timeout"),
 		Flags: FlagTimeout | FlagTemporary,
 	}
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		var flaggedErr *FlaggedError
@@ -172,7 +172,7 @@ func BenchmarkWrappingChain_Shallow(b *testing.B) {
 	// Single level wrapping
 	baseErr := ErrDNSTimeout
 	wrappedErr := fmt.Errorf("operation failed: %w", baseErr)
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = IsDNSTimeoutHybrid(wrappedErr)
@@ -185,7 +185,7 @@ func BenchmarkWrappingChain_Deep(b *testing.B) {
 	wrappedErr1 := fmt.Errorf("level 1: %w", baseErr)
 	wrappedErr2 := fmt.Errorf("level 2: %w", wrappedErr1)
 	wrappedErr3 := fmt.Errorf("level 3: %w", wrappedErr2)
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = IsDNSTimeoutHybrid(wrappedErr3)

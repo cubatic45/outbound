@@ -45,7 +45,7 @@ func NewClient(config *Config) (Client, error) {
 	return c, nil
 }
 
-// TODO: 同一个 dialer 不同 mark 如何处理 quic conn?
+// TODO: How to handle quic conn for the same dialer with different marks?
 
 type clientImpl struct {
 	config *Config

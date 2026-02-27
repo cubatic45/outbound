@@ -19,7 +19,7 @@ import (
 var (
 	CRLF        = []byte{13, 10}
 	FailAuthErr = fmt.Errorf("incorrect password")
-	
+
 	// passwordHashCache caches SHA224 hash results of passwords
 	passwordHashCache sync.Map
 )
@@ -41,13 +41,13 @@ func getPasswordHash(password string) [56]byte {
 	if cached, ok := passwordHashCache.Load(password); ok {
 		return cached.([56]byte)
 	}
-	
+
 	// Cache miss, calculate hash
 	hash := sha256.New224()
 	hash.Write([]byte(password))
 	var result [56]byte
 	hex.Encode(result[:], hash.Sum(nil))
-	
+
 	// Store in cache
 	passwordHashCache.Store(password, result)
 	return result
@@ -56,7 +56,7 @@ func getPasswordHash(password string) [56]byte {
 func NewConn(conn netproxy.Conn, metadata Metadata, password string) (c *Conn, err error) {
 	// Use cached password hash for ~6x performance improvement
 	pass := getPasswordHash(password)
-	
+
 	c = &Conn{
 		Conn:     conn,
 		metadata: metadata,

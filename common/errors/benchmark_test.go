@@ -23,10 +23,10 @@ import (
 func BenchmarkDNS_HttpClient_DirectOld(b *testing.B) {
 	// Simulate real DNS timeout error from net.Resolver
 	err := fmt.Errorf("lookup example.com on 127.0.0.53:53: dial udp 127.0.0.53:53: i/o timeout")
-	
+
 	callbackCalled := false
 	callback := func() { callbackCalled = true }
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// OLD CODE (from direct/dialer.go):
@@ -36,7 +36,7 @@ func BenchmarkDNS_HttpClient_DirectOld(b *testing.B) {
 			}
 		}
 	}
-	
+
 	// Prevent compiler optimization
 	if !callbackCalled {
 		b.Error("callback should have been called")
@@ -48,10 +48,10 @@ func BenchmarkDNS_HttpClient_DirectOld(b *testing.B) {
 func BenchmarkDNS_HttpClient_DirectNew(b *testing.B) {
 	// Simulate real DNS timeout error from net.Resolver
 	err := fmt.Errorf("lookup example.com on 127.0.0.53:53: dial udp 127.0.0.53:53: i/o timeout")
-	
+
 	callbackCalled := false
 	callback := func() { callbackCalled = true }
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// NEW CODE (optimized):
@@ -61,7 +61,7 @@ func BenchmarkDNS_HttpClient_DirectNew(b *testing.B) {
 			}
 		}
 	}
-	
+
 	// Prevent compiler optimization
 	if !callbackCalled {
 		b.Error("callback should have been called")
@@ -73,9 +73,9 @@ func BenchmarkDNS_HttpClient_DirectNew(b *testing.B) {
 func BenchmarkStream_TUIC_ClientRingOld(b *testing.B) {
 	// Simulate real stream exhausted error from QUIC
 	streamErr := errors.New("too many open streams")
-	
+
 	shouldRetry := false
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// OLD CODE (from tuic/client_ring.go):
@@ -86,7 +86,7 @@ func BenchmarkStream_TUIC_ClientRingOld(b *testing.B) {
 			shouldRetry = true
 		}
 	}
-	
+
 	// Prevent compiler optimization
 	if !shouldRetry {
 		b.Error("should have retried")
@@ -98,9 +98,9 @@ func BenchmarkStream_TUIC_ClientRingOld(b *testing.B) {
 func BenchmarkStream_TUIC_ClientRingNew(b *testing.B) {
 	// Simulate real stream exhausted error from QUIC
 	streamErr := errors.New("too many open streams")
-	
+
 	shouldRetry := false
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// NEW CODE (optimized):
@@ -109,7 +109,7 @@ func BenchmarkStream_TUIC_ClientRingNew(b *testing.B) {
 			shouldRetry = true
 		}
 	}
-	
+
 	// Prevent compiler optimization
 	if !shouldRetry {
 		b.Error("should have retried")
@@ -122,7 +122,7 @@ func BenchmarkStream_TUIC_ClientOld(b *testing.B) {
 	// Simulate deferQuicConn error check
 	streamErr := errors.New("too many open streams")
 	tempErr := false
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		err := streamErr
@@ -139,7 +139,7 @@ func BenchmarkStream_TUIC_ClientNew(b *testing.B) {
 	// Simulate deferQuicConn error check
 	streamErr := errors.New("too many open streams")
 	tempErr := false
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		err := streamErr
@@ -158,14 +158,14 @@ func BenchmarkStream_TUIC_ClientNew(b *testing.B) {
 // in a single benchmark for direct comparison.
 func BenchmarkComparative_DNS_Check(b *testing.B) {
 	dnsErr := fmt.Errorf("lookup example.com: i/o timeout")
-	
+
 	b.Run("Old_StringMatch", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			_ = strings.Contains(dnsErr.Error(), "i/o timeout") && 
+			_ = strings.Contains(dnsErr.Error(), "i/o timeout") &&
 				strings.Contains(dnsErr.Error(), "lookup")
 		}
 	})
-	
+
 	b.Run("New_TypeSafe", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			_ = IsDNSTimeout(dnsErr)
@@ -177,13 +177,13 @@ func BenchmarkComparative_DNS_Check(b *testing.B) {
 // for stream error detection.
 func BenchmarkComparative_Stream_Check(b *testing.B) {
 	streamErr := errors.New("too many open streams")
-	
+
 	b.Run("Old_StringMatch", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			_ = strings.Contains(streamErr.Error(), "too many open streams")
 		}
 	})
-	
+
 	b.Run("New_TypeSafe", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			_ = IsStreamExhausted(streamErr)
@@ -197,7 +197,7 @@ func BenchmarkComparative_ComplexStream_Check(b *testing.B) {
 	streamErr := errors.New("too many open streams")
 	clientClosedErr := errors.New("client closed")
 	holdOnErr := errors.New("hold on")
-	
+
 	b.Run("Old_ComplexStringMatch", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			err := streamErr
@@ -208,7 +208,7 @@ func BenchmarkComparative_ComplexStream_Check(b *testing.B) {
 			_ = shouldRetry
 		}
 	})
-	
+
 	b.Run("New_ShouldRetry", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			_ = ShouldRetryStreamOperation(streamErr)
@@ -224,7 +224,7 @@ func BenchmarkComparative_ComplexStream_Check(b *testing.B) {
 // for DNS timeout checking.
 func BenchmarkMemory_DNS_Check_Detailed(b *testing.B) {
 	dnsErr := fmt.Errorf("lookup example.com: i/o timeout")
-	
+
 	b.Run("Old", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
@@ -232,7 +232,7 @@ func BenchmarkMemory_DNS_Check_Detailed(b *testing.B) {
 			_ = strings.Contains(errStr, "i/o timeout") && strings.Contains(errStr, "lookup")
 		}
 	})
-	
+
 	b.Run("New", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
@@ -245,14 +245,14 @@ func BenchmarkMemory_DNS_Check_Detailed(b *testing.B) {
 // for stream exhausted checking.
 func BenchmarkMemory_Stream_Check_Detailed(b *testing.B) {
 	streamErr := errors.New("too many open streams")
-	
+
 	b.Run("Old", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			_ = strings.Contains(streamErr.Error(), "too many open streams")
 		}
 	})
-	
+
 	b.Run("New", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {

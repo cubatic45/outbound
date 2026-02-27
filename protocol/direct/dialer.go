@@ -13,9 +13,9 @@ import (
 )
 
 var (
-	SymmetricDirect netproxy.Dialer = &lazyDirectDialer{fullcone: false}
-	FullconeDirect  netproxy.Dialer = &lazyDirectDialer{fullcone: true}
-	directOnce      sync.Once
+	SymmetricDirect  netproxy.Dialer = &lazyDirectDialer{fullcone: false}
+	FullconeDirect   netproxy.Dialer = &lazyDirectDialer{fullcone: true}
+	directOnce       sync.Once
 	_symmetricDirect netproxy.Dialer
 	_fullconeDirect  netproxy.Dialer
 )

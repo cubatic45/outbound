@@ -9,8 +9,8 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/tuic/common"
-	"github.com/olicesx/quic-go"
 	"github.com/google/uuid"
+	"github.com/olicesx/quic-go"
 )
 
 func init() {

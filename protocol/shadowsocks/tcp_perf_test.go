@@ -43,28 +43,28 @@ func BenchmarkTCPEncryptFirstWrite(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
 	rand.Read(masterKey)
-	
+
 	plaintext := make([]byte, 1024)
-	
+
 	metadata := protocol.Metadata{
 		Cipher:   "aes-256-gcm",
 		IsClient: true,
 	}
-	
+
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		mock := &mockConn{}
 		conn, err := NewTCPConn(mock, metadata, masterKey, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
-		
+
 		_, err = conn.Write(plaintext)
 		if err != nil {
 			b.Fatal(err)
 		}
-		
+
 		conn.Close()
 	}
 }
@@ -74,35 +74,35 @@ func BenchmarkTCPEncryptSubsequentWrites(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
 	rand.Read(masterKey)
-	
+
 	plaintext := make([]byte, 1024)
-	
+
 	metadata := protocol.Metadata{
 		Cipher:   "aes-256-gcm",
 		IsClient: true,
 	}
-	
+
 	mock := &mockConn{}
 	conn, err := NewTCPConn(mock, metadata, masterKey, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	// First write to initialize cipher
 	_, err = conn.Write(plaintext)
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		_, err = conn.Write(plaintext)
 		if err != nil {
 			b.Fatal(err)
 		}
 	}
-	
+
 	conn.Close()
 }
 
@@ -111,21 +111,21 @@ func BenchmarkTCPDecryptFirstRead(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
 	rand.Read(masterKey)
-	
+
 	plaintext := make([]byte, 1024)
-	
+
 	metadataClient := protocol.Metadata{
 		Cipher:   "aes-256-gcm",
 		IsClient: true,
 	}
-	
+
 	metadataServer := protocol.Metadata{
 		Cipher:   "aes-256-gcm",
 		IsClient: false,
 	}
-	
+
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		// Create client and write encrypted data
 		mockClient := &mockConn{}
@@ -133,25 +133,25 @@ func BenchmarkTCPDecryptFirstRead(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		
+
 		_, err = client.Write(plaintext)
 		if err != nil {
 			b.Fatal(err)
 		}
-		
+
 		// Create server and read encrypted data
 		mockServer := &mockConn{readBuf: mockClient.writeBuf}
 		server, err := NewTCPConn(mockServer, metadataServer, masterKey, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
-		
+
 		decrypted := make([]byte, len(plaintext))
 		_, err = io.ReadFull(server, decrypted)
 		if err != nil {
 			b.Fatal(err)
 		}
-		
+
 		client.Close()
 		server.Close()
 	}
@@ -162,26 +162,26 @@ func BenchmarkTCPDecryptSubsequentReads(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
 	rand.Read(masterKey)
-	
+
 	plaintext := make([]byte, 1024)
-	
+
 	metadataClient := protocol.Metadata{
 		Cipher:   "aes-256-gcm",
 		IsClient: true,
 	}
-	
+
 	metadataServer := protocol.Metadata{
 		Cipher:   "aes-256-gcm",
 		IsClient: false,
 	}
-	
+
 	// Setup client and write multiple chunks
 	mockClient := &mockConn{}
 	client, err := NewTCPConn(mockClient, metadataClient, masterKey, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	// Write 100 chunks
 	for i := 0; i < 100; i++ {
 		_, err = client.Write(plaintext)
@@ -189,30 +189,30 @@ func BenchmarkTCPDecryptSubsequentReads(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-	
+
 	// Setup server
 	mockServer := &mockConn{readBuf: mockClient.writeBuf}
 	server, err := NewTCPConn(mockServer, metadataServer, masterKey, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	// First read to initialize cipher
 	decrypted := make([]byte, len(plaintext))
 	_, err = io.ReadFull(server, decrypted)
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		_, err = io.ReadFull(server, decrypted)
 		if err != nil {
 			b.Fatal(err)
 		}
 	}
-	
+
 	client.Close()
 	server.Close()
 }
@@ -228,35 +228,35 @@ func benchmarkTCPChunkSize(b *testing.B, size int) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
 	rand.Read(masterKey)
-	
+
 	plaintext := make([]byte, size)
-	
+
 	metadata := protocol.Metadata{
 		Cipher:   "aes-256-gcm",
 		IsClient: true,
 	}
-	
+
 	mock := &mockConn{}
 	conn, err := NewTCPConn(mock, metadata, masterKey, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	// First write to initialize cipher
 	_, err = conn.Write(plaintext)
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		_, err = conn.Write(plaintext)
 		if err != nil {
 			b.Fatal(err)
 		}
 	}
-	
+
 	conn.Close()
 }
 
@@ -265,35 +265,35 @@ func BenchmarkTCPLargeStream(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
 	rand.Read(masterKey)
-	
+
 	// 1MB stream
 	totalSize := 1024 * 1024
 	chunkSize := 16384
 	chunks := totalSize / chunkSize
-	
+
 	plaintext := make([]byte, chunkSize)
-	
+
 	metadata := protocol.Metadata{
 		Cipher:   "aes-256-gcm",
 		IsClient: true,
 	}
-	
+
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		mock := &mockConn{}
 		conn, err := NewTCPConn(mock, metadata, masterKey, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
-		
+
 		for j := 0; j < chunks; j++ {
 			_, err = conn.Write(plaintext)
 			if err != nil {
 				b.Fatal(err)
 			}
 		}
-		
+
 		conn.Close()
 	}
 }
@@ -303,28 +303,28 @@ func BenchmarkTCPMutexOverhead(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
 	rand.Read(masterKey)
-	
+
 	plaintext := make([]byte, 1024)
-	
+
 	metadata := protocol.Metadata{
 		Cipher:   "aes-256-gcm",
 		IsClient: true,
 	}
-	
+
 	mock := &mockConn{}
 	conn, err := NewTCPConn(mock, metadata, masterKey, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	// Initialize cipher
 	_, err = conn.Write(plaintext)
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		// This will acquire writeMutex
 		_, err = conn.Write(plaintext)
@@ -332,7 +332,7 @@ func BenchmarkTCPMutexOverhead(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-	
+
 	conn.Close()
 }
 
@@ -341,28 +341,28 @@ func BenchmarkTCPPoolOverhead(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
 	rand.Read(masterKey)
-	
+
 	plaintext := make([]byte, 1024)
-	
+
 	metadata := protocol.Metadata{
 		Cipher:   "aes-256-gcm",
 		IsClient: true,
 	}
-	
+
 	mock := &mockConn{}
 	conn, err := NewTCPConn(mock, metadata, masterKey, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	// Initialize cipher
 	_, err = conn.Write(plaintext)
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	b.ResetTimer()
-	
+
 	for i := 0; i < b.N; i++ {
 		// Each write allocates from pool
 		_, err = conn.Write(plaintext)
@@ -370,7 +370,7 @@ func BenchmarkTCPPoolOverhead(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-	
+
 	conn.Close()
 }
 
@@ -380,12 +380,12 @@ func BenchmarkTCPFirstVsSubsequent(b *testing.B) {
 		conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 		masterKey := make([]byte, conf.KeyLen)
 		plaintext := make([]byte, 1024)
-		
+
 		metadata := protocol.Metadata{
 			Cipher:   "aes-256-gcm",
 			IsClient: true,
 		}
-		
+
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			mock := &mockConn{}
@@ -394,21 +394,21 @@ func BenchmarkTCPFirstVsSubsequent(b *testing.B) {
 			conn.Close()
 		}
 	})
-	
+
 	b.Run("SubsequentWrite", func(b *testing.B) {
 		conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 		masterKey := make([]byte, conf.KeyLen)
 		plaintext := make([]byte, 1024)
-		
+
 		metadata := protocol.Metadata{
 			Cipher:   "aes-256-gcm",
 			IsClient: true,
 		}
-		
+
 		mock := &mockConn{}
 		conn, _ := NewTCPConn(mock, metadata, masterKey, nil)
 		_, _ = conn.Write(plaintext) // Initialize
-		
+
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			_, _ = conn.Write(plaintext)
