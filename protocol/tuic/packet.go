@@ -179,30 +179,31 @@ func (q *quicStreamPacketConn) SetWriteDeadline(t time.Time) error {
 
 func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.incomingPackets != nil {
-		for {
-			packet, closed := q.incomingPackets.PopFrontBlock()
-			if closed {
-				err = net.ErrClosed
-				return
-			}
-			_d, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, &deFragger{})
-			d := _d.(*deFragger)
-			var assembled bool
-			// Feed packet into this deFragger.
-			// Return if this PKT_ID is ready and assembled.
-			if n, addr, assembled = d.Feed(packet, p); assembled {
-				q.deFraggers.Delete(packet.PKT_ID)
-				return
-			} else {
-				// FIXME: Timeout to clean deFraggers.
-			}
-		}
-	} else {
-		err = net.ErrClosed
+	incomingPackets := q.incomingPackets
+	q.mu.Unlock()
+
+	if incomingPackets == nil {
+		return 0, netip.AddrPort{}, net.ErrClosed
 	}
-	return
+
+	for {
+		packet, closed := incomingPackets.PopFrontBlock()
+		if closed {
+			err = net.ErrClosed
+			return
+		}
+		_d, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, &deFragger{})
+		d := _d.(*deFragger)
+		var assembled bool
+		// Feed packet into this deFragger.
+		// Return if this PKT_ID is ready and assembled.
+		if n, addr, assembled = d.Feed(packet, p); assembled {
+			q.deFraggers.Delete(packet.PKT_ID)
+			return
+		} else {
+			// FIXME: Timeout to clean deFraggers.
+		}
+	}
 }
 
 func (q *quicStreamPacketConn) WriteTo(p []byte, addr string) (n int, err error) {

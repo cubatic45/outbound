@@ -175,6 +175,10 @@ func (t *clientImpl) handleMessage(quicConn quic.Connection) (err error) {
 		// QUIC's keepalive mechanism will handle connection health
 		message, err := quicConn.ReceiveDatagram(context.Background())
 		if err != nil {
+			// Retry on temporary errors (timeout, network glitch, etc.)
+			if common.IsTemporaryError(err) {
+				continue
+			}
 			return err
 		}
 		go func(message []byte) (err error) {

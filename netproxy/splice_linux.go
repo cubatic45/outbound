@@ -95,7 +95,11 @@ func ReadFrom(dst Conn, src io.Reader) (int64, error) {
 		}
 
 		// Perform zero-copy transfer
-		return splice(dstFD, srcFD, 1<<40) // 1TB limit (effectively unlimited)
+		n, err := splice(dstFD, srcFD, 1<<40)
+		if err == nil {
+			return n, nil
+		}
+		// Fallback on splice errors (EINVAL for socket-to-socket, etc)
 	}
 
 fallback:
@@ -137,7 +141,11 @@ func WriteTo(src Conn, dst io.Writer) (int64, error) {
 		}
 
 		// Perform zero-copy transfer
-		return splice(dstFD, srcFD, 1<<40)
+		n, err := splice(dstFD, srcFD, 1<<40)
+		if err == nil {
+			return n, nil
+		}
+		// Fallback on splice errors
 	}
 
 fallback:

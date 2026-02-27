@@ -8,7 +8,6 @@ package shadowsocks
 import (
 	"bytes"
 	"crypto/rand"
-	"sync"
 	"testing"
 
 	"github.com/daeuniverse/outbound/ciphers"
@@ -123,59 +122,8 @@ func TestCrossCompatibility(t *testing.T) {
 	}
 }
 
-// TestCacheEffectiveness tests that cache actually works
-func TestCacheEffectiveness(t *testing.T) {
-	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
-	masterKey := make([]byte, conf.KeyLen)
-	rand.Read(masterKey)
-
-	salt := make([]byte, conf.SaltLen)
-	rand.Read(salt)
-
-	plaintext := []byte("Cache test")
-	reusedInfo := []byte("ss-subkey")
-
-	key := &Key{
-		CipherConf: conf,
-		MasterKey:  masterKey,
-	}
-
-	// First encryption - should create cache entry
-	encrypted1, err := EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	encrypted1.Put()
-
-	// Check cache has entry
-	cacheKey := generateCacheKey(salt, masterKey)
-	if _, ok := udpEncryptCache.Load(cacheKey); !ok {
-		t.Error("Cache entry not created after first encryption")
-	}
-
-	// Second encryption with same salt - should use cache
-	encrypted2, err := EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer encrypted2.Put()
-
-	// Verify it still works
-	decrypted, err := DecryptUDPFromPoolOptimized(key, encrypted2, reusedInfo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer decrypted.Put()
-
-	if !bytes.Equal(decrypted, plaintext) {
-		t.Error("Cache-based encryption/decryption failed")
-	}
-}
-
+// TestMultipleSalts verifies correct behavior with different salts
 func TestMultipleSalts(t *testing.T) {
-	udpEncryptCache = sync.Map{}
-	udpDecryptCache = sync.Map{}
-
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
 	rand.Read(masterKey)
@@ -232,7 +180,7 @@ func BenchmarkEncryptOriginal(b *testing.B) {
 	}
 }
 
-func BenchmarkEncryptOptimized_NoCache(b *testing.B) {
+func BenchmarkEncryptOptimized(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
 	salt := make([]byte, conf.SaltLen)
@@ -243,32 +191,6 @@ func BenchmarkEncryptOptimized_NoCache(b *testing.B) {
 		CipherConf: conf,
 		MasterKey:  masterKey,
 	}
-
-	// Clear cache
-	udpEncryptCache = sync.Map{}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		shadowBytes, _ := EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
-		shadowBytes.Put()
-	}
-}
-
-func BenchmarkEncryptOptimized_WithCache(b *testing.B) {
-	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
-	masterKey := make([]byte, conf.KeyLen)
-	salt := make([]byte, conf.SaltLen)
-	plaintext := make([]byte, 1024)
-	reusedInfo := []byte("ss-subkey")
-
-	key := &Key{
-		CipherConf: conf,
-		MasterKey:  masterKey,
-	}
-
-	// Warm up cache
-	encrypted, _ := EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
-	encrypted.Put()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -299,32 +221,7 @@ func BenchmarkDecryptOriginal(b *testing.B) {
 	}
 }
 
-func BenchmarkDecryptOptimized_NoCache(b *testing.B) {
-	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
-	masterKey := make([]byte, conf.KeyLen)
-	salt := make([]byte, conf.SaltLen)
-	plaintext := make([]byte, 1024)
-	reusedInfo := []byte("ss-subkey")
-
-	key := &Key{
-		CipherConf: conf,
-		MasterKey:  masterKey,
-	}
-
-	// Clear cache
-	udpDecryptCache = sync.Map{}
-
-	shadowBytes, _ := EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
-	defer shadowBytes.Put()
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		buf, _ := DecryptUDPFromPoolOptimized(key, shadowBytes, reusedInfo)
-		buf.Put()
-	}
-}
-
-func BenchmarkDecryptOptimized_WithCache(b *testing.B) {
+func BenchmarkDecryptOptimized(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
 	salt := make([]byte, conf.SaltLen)
@@ -339,10 +236,6 @@ func BenchmarkDecryptOptimized_WithCache(b *testing.B) {
 	shadowBytes, _ := EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
 	defer shadowBytes.Put()
 
-	// Warm up cache
-	decrypted, _ := DecryptUDPFromPoolOptimized(key, shadowBytes, reusedInfo)
-	decrypted.Put()
-
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		buf, _ := DecryptUDPFromPoolOptimized(key, shadowBytes, reusedInfo)
@@ -350,11 +243,10 @@ func BenchmarkDecryptOptimized_WithCache(b *testing.B) {
 	}
 }
 
-// Benchmark real-world scenario: repeated UDP packets with same salt
+// Benchmark real-world scenario: UDP packets with different salts
 func BenchmarkRealWorld_Original(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
-	salt := make([]byte, conf.SaltLen)
 	plaintext := make([]byte, 512)
 	reusedInfo := []byte("ss-subkey")
 
@@ -363,9 +255,10 @@ func BenchmarkRealWorld_Original(b *testing.B) {
 		MasterKey:  masterKey,
 	}
 
-	// Simulate 100 packets with same salt (common in QUIC/DTLS)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		salt := make([]byte, conf.SaltLen)
+		rand.Read(salt)
 		encrypted, _ := EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 		decrypted, _ := DecryptUDPFromPool(key, encrypted, reusedInfo)
 		encrypted.Put()
@@ -376,7 +269,6 @@ func BenchmarkRealWorld_Original(b *testing.B) {
 func BenchmarkRealWorld_Optimized(b *testing.B) {
 	conf := ciphers.AeadCiphersConf["aes-256-gcm"]
 	masterKey := make([]byte, conf.KeyLen)
-	salt := make([]byte, conf.SaltLen)
 	plaintext := make([]byte, 512)
 	reusedInfo := []byte("ss-subkey")
 
@@ -385,9 +277,10 @@ func BenchmarkRealWorld_Optimized(b *testing.B) {
 		MasterKey:  masterKey,
 	}
 
-	// Simulate 100 packets with same salt (common in QUIC/DTLS)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		salt := make([]byte, conf.SaltLen)
+		rand.Read(salt)
 		encrypted, _ := EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
 		decrypted, _ := DecryptUDPFromPoolOptimized(key, encrypted, reusedInfo)
 		encrypted.Put()
