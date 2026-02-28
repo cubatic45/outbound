@@ -5,8 +5,74 @@ import (
 	"syscall"
 )
 
+// SpliceFunc performs zero-copy splice between two connections.
+// This is exported for use by wrappers that need to splice after
+// handling buffered data (e.g., ConnSniffer).
+type SpliceFunc func(dstFD, srcFD int, limit int64) (int64, error)
+
+// RawSplice is the low-level splice implementation, exported for
+// advanced use cases. It performs zero-copy data transfer between
+// two file descriptors using the splice syscall.
+func RawSplice(dstFD, srcFD int, limit int64) (int64, error) {
+	return splice(dstFD, srcFD, limit)
+}
+
+// SpliceTo attempts zero-copy splice from srcConn to dst.
+// Returns (bytesTransferred, usedSplice, error).
+// If splice is not available, it returns (0, false, nil) to indicate
+// the caller should fall back to io.Copy.
+func SpliceTo(dst io.Writer, srcConn interface{ SyscallConn() (syscall.RawConn, error) }) (int64, bool, error) {
+	// Check if dst supports SyscallConn
+	dstConn, ok := dst.(interface {
+		SyscallConn() (syscall.RawConn, error)
+	})
+	if !ok {
+		return 0, false, nil
+	}
+
+	// Get raw connections
+	rawDst, err := dstConn.SyscallConn()
+	if err != nil {
+		return 0, false, err
+	}
+
+	rawSrc, err := srcConn.SyscallConn()
+	if err != nil {
+		return 0, false, err
+	}
+
+	var dstFD, srcFD int
+	var errDst, errSrc error
+
+	// Extract file descriptors
+	rawDst.Control(func(fd uintptr) {
+		dstFD = int(fd)
+	})
+	rawSrc.Control(func(fd uintptr) {
+		srcFD = int(fd)
+	})
+
+	if errDst != nil || errSrc != nil {
+		return 0, false, nil
+	}
+
+	// Perform zero-copy transfer
+	n, err := splice(dstFD, srcFD, spliceToEOFLimit) // Transfer until EOF
+	if err != nil {
+		return 0, false, err
+	}
+	return n, true, nil
+}
+
 const (
-	maxSpliceSize = 1 << 30 // 1GB maximum per splice call
+	// maxSpliceSize is the maximum size for a single splice(2) syscall.
+	// Linux splice has a limit of 1GB per call; larger values may fail.
+	maxSpliceSize = 1 << 30 // 1GB
+
+	// spliceToEOFLimit is a large limit for "transfer until EOF".
+	// 1TB is far larger than any realistic TCP connection will transfer,
+	// so EOF will always be reached before the limit.
+	spliceToEOFLimit = 1 << 40 // 1TB, effectively unlimited
 
 	// Splice flags
 	SPLICE_F_MOVE     = 0x01 // Move pages instead of copying
@@ -95,7 +161,7 @@ func ReadFrom(dst Conn, src io.Reader) (int64, error) {
 		}
 
 		// Perform zero-copy transfer
-		n, err := splice(dstFD, srcFD, 1<<40)
+		n, err := splice(dstFD, srcFD, spliceToEOFLimit)
 		if err == nil {
 			return n, nil
 		}
@@ -141,7 +207,7 @@ func WriteTo(src Conn, dst io.Writer) (int64, error) {
 		}
 
 		// Perform zero-copy transfer
-		n, err := splice(dstFD, srcFD, 1<<40)
+		n, err := splice(dstFD, srcFD, spliceToEOFLimit)
 		if err == nil {
 			return n, nil
 		}
