@@ -16,23 +16,12 @@ import (
 
 const maxPSKListLength = 8
 
-// FakeNetPacketConn wraps a PacketConn to work with specific address
+// FakeNetPacketConn wraps a PacketConn to override the target address.
+// It embeds netproxy.PacketConn directly, so it implements the interface correctly.
+// The Addr field is used by UdpConn.WriteTo to determine the actual target.
 type FakeNetPacketConn struct {
 	netproxy.PacketConn
 	Addr string
-}
-
-func (c *FakeNetPacketConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
-	return c.PacketConn.WriteTo(b, c.Addr)
-}
-
-func (c *FakeNetPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
-	n, _, err = c.PacketConn.ReadFrom(b)
-	if err != nil {
-		return 0, nil, err
-	}
-	udpAddr, _ := net.ResolveUDPAddr("udp", c.Addr)
-	return n, udpAddr, nil
 }
 
 func init() {
