@@ -2,18 +2,18 @@ package common
 
 import (
 	"context"
-	"errors"
 	"net"
 
+	outbounderrors "github.com/daeuniverse/outbound/common/errors"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/olicesx/quic-go"
 )
 
 var (
-	ErrClientClosed       = errors.New("client closed")
-	ErrTooManyOpenStreams = errors.New("too many open streams")
-	ErrHoldOn             = errors.New("hold on")
+	ErrClientClosed       = outbounderrors.ErrClientClosed
+	ErrTooManyOpenStreams = outbounderrors.ErrStreamExhausted
+	ErrHoldOn             = outbounderrors.ErrOperationHold
 )
 
 type DialFunc func(ctx context.Context, dialer netproxy.Dialer) (transport *quic.Transport, addr net.Addr, err error)
@@ -34,21 +34,5 @@ const (
 
 // IsTemporaryError checks if an error is temporary and should not close the connection
 func IsTemporaryError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	// Context timeout/cancelled are temporary
-	if errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, context.Canceled) {
-		return true
-	}
-
-	// Net temporary errors
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Temporary() {
-		return true
-	}
-
-	return false
+	return outbounderrors.IsTemporaryError(err)
 }

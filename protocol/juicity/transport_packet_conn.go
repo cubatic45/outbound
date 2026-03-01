@@ -52,7 +52,7 @@ func (c *TransportPacketConn) Write(b []byte) (int, error) {
 		salt[1] = 0
 		fastrand.Read(salt[2:])
 	}
-	toWrite, err := shadowsocks.EncryptUDPFromPoolOptimized(c.key, b, salt, ciphers.JuicityReusedInfo)
+	toWrite, err := shadowsocks.EncryptUDPFromPool(c.key, b, salt, ciphers.JuicityReusedInfo)
 	if err != nil {
 		return 0, err
 	}
@@ -72,7 +72,7 @@ func (c *TransportPacketConn) ReadFrom(p []byte) (n int, addrPort netip.AddrPort
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	n, err = shadowsocks.DecryptUDPOptimized(p, c.key, buf[:n], ciphers.JuicityReusedInfo)
+	n, err = shadowsocks.DecryptUDP(p, c.key, buf[:n], ciphers.JuicityReusedInfo)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}

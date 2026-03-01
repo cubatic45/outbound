@@ -90,7 +90,6 @@ func (r *clientRing) _tryNext(current **list.Element, f func(cli *clientRingNode
 
 	if *current == r.current {
 		// Clients are exhausted.
-		// 🚀 Fast path: direct comparison (1.19 ns per check)
 		if err == common.ErrTooManyOpenStreams ||
 			err == common.ErrClientClosed ||
 			err == common.ErrHoldOn {

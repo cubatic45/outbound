@@ -77,9 +77,6 @@ func (c *UdpConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *UdpConn) Write(b []byte) (n int, err error) {
-	if err != nil {
-		return 0, err
-	}
 	return c.WriteTo(b, c.tgtAddr)
 }
 
@@ -105,16 +102,12 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	copy(chunk[len(prefix):], b)
 	salt := c.sg.Get()
 
-	// Use optimized version with cipher cache (5x+ performance improvement)
 	key := &Key{
 		CipherConf: c.cipherConf,
 		MasterKey:  c.masterKey,
 	}
 
-	toWrite, err := EncryptUDPFromPoolOptimized(key, chunk, salt, ShadowsocksReusedInfo)
-
-	// [LEGACY] Non-optimized version (kept for reference):
-	// toWrite, err = EncryptUDPFromPool(key, chunk, salt, ShadowsocksReusedInfo)
+	toWrite, err := EncryptUDPFromPool(key, chunk, salt, ShadowsocksReusedInfo)
 
 	pool.Put(salt)
 	if err != nil {
@@ -135,16 +128,12 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 		return 0, netip.AddrPort{}, err
 	}
 
-	// Use optimized version with cipher cache (5x+ performance improvement)
 	key := &Key{
 		CipherConf: c.cipherConf,
 		MasterKey:  c.masterKey,
 	}
 
-	n, err = DecryptUDPOptimized(b, key, enc[:n], ShadowsocksReusedInfo)
-
-	// [LEGACY] Non-optimized version (kept for reference):
-	// n, err = DecryptUDP(b, key, enc[:n], ShadowsocksReusedInfo)
+	n, err = DecryptUDP(b, key, enc[:n], ShadowsocksReusedInfo)
 
 	if err != nil {
 		return 0, netip.AddrPort{}, err
@@ -165,8 +154,7 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	var typ protocol.MetadataType
-	switch typ {
+	switch mdata.Type {
 	case protocol.MetadataTypeIPv4, protocol.MetadataTypeIPv6:
 		ip, err := netip.ParseAddr(mdata.Hostname)
 		if err != nil {
@@ -174,7 +162,7 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 		}
 		addr = netip.AddrPortFrom(ip, mdata.Port)
 	default:
-		return 0, netip.AddrPort{}, fmt.Errorf("bad metadata type: %v; should be ip", typ)
+		return 0, netip.AddrPort{}, fmt.Errorf("bad metadata type: %v; should be ip", mdata.Type)
 	}
 	copy(b, b[sizeMetadata:])
 	n -= sizeMetadata

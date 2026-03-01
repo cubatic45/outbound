@@ -31,8 +31,6 @@ func putSubKey(subKey []byte) {
 	}
 }
 
-// EncryptUDPFromPool returns shadowBytes from pool.
-// the shadowBytes MUST be put back.
 func EncryptUDPFromPool(key *Key, b []byte, salt []byte, reusedInfo []byte) (shadowBytes pool.PB, err error) {
 	var buf = pool.Get(key.CipherConf.SaltLen + len(b) + key.CipherConf.TagLen)
 	defer func() {
@@ -43,12 +41,7 @@ func EncryptUDPFromPool(key *Key, b []byte, salt []byte, reusedInfo []byte) (sha
 	copy(buf, salt)
 	subKey := getSubKey(key.CipherConf.KeyLen)
 	defer putSubKey(subKey)
-	kdf := hkdf.New(
-		sha1.New,
-		key.MasterKey,
-		buf[:key.CipherConf.SaltLen],
-		reusedInfo,
-	)
+	kdf := hkdf.New(sha1.New, key.MasterKey, buf[:key.CipherConf.SaltLen], reusedInfo)
 	_, err = io.ReadFull(kdf, subKey)
 	if err != nil {
 		return nil, err
@@ -61,7 +54,6 @@ func EncryptUDPFromPool(key *Key, b []byte, salt []byte, reusedInfo []byte) (sha
 	return buf, nil
 }
 
-// DecryptUDP will decrypt the data in place
 func DecryptUDPFromPool(key *Key, shadowBytes []byte, reusedInfo []byte) (buf pool.PB, err error) {
 	buf = pool.Get(len(shadowBytes))
 	n, err := DecryptUDP(buf[:0], key, shadowBytes, reusedInfo)
@@ -72,26 +64,20 @@ func DecryptUDPFromPool(key *Key, shadowBytes []byte, reusedInfo []byte) (buf po
 	return buf[:n], nil
 }
 
-// DecryptUDP will decrypt the data in place
 func DecryptUDP(writeTo []byte, key *Key, shadowBytes []byte, reusedInfo []byte) (n int, err error) {
 	if len(shadowBytes) < key.CipherConf.SaltLen {
 		return 0, fmt.Errorf("short length to decrypt")
 	}
 	subKey := getSubKey(key.CipherConf.KeyLen)
 	defer putSubKey(subKey)
-	kdf := hkdf.New(
-		sha1.New,
-		key.MasterKey,
-		shadowBytes[:key.CipherConf.SaltLen],
-		reusedInfo,
-	)
+	kdf := hkdf.New(sha1.New, key.MasterKey, shadowBytes[:key.CipherConf.SaltLen], reusedInfo)
 	_, err = io.ReadFull(kdf, subKey)
 	if err != nil {
-		return
+		return 0, err
 	}
 	ciph, err := key.CipherConf.NewCipher(subKey)
 	if err != nil {
-		return
+		return 0, err
 	}
 	writeTo, err = ciph.Open(writeTo[:0], ciphers.ZeroNonce[:key.CipherConf.NonceLen], shadowBytes[key.CipherConf.SaltLen:], nil)
 	if err != nil {

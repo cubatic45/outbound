@@ -12,6 +12,7 @@ import (
 
 	"github.com/daeuniverse/outbound/netproxy"
 	coreErrs "github.com/daeuniverse/outbound/protocol/hysteria2/errors"
+	outbounderrors "github.com/daeuniverse/outbound/common/errors"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/protocol"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/utils"
 	"github.com/daeuniverse/outbound/protocol/tuic/congestion"
@@ -353,8 +354,7 @@ func (io *udpIOImpl) ReceiveMessage() (*protocol.UDPMessage, error) {
 	for {
 		msg, err := io.Conn.ReceiveDatagram(context.Background())
 		if err != nil {
-			// Only stop on fatal errors, continue on temporary errors (timeout, etc)
-			if !isTemporaryError(err) {
+			if !outbounderrors.IsTemporaryError(err) {
 				return nil, err
 			}
 			continue
@@ -368,23 +368,6 @@ func (io *udpIOImpl) ReceiveMessage() (*protocol.UDPMessage, error) {
 	}
 }
 
-// isTemporaryError checks if an error is temporary and should not stop the receiver
-func isTemporaryError(err error) bool {
-	if err == nil {
-		return false
-	}
-	// Context timeout/cancelled are temporary
-	if errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, context.Canceled) {
-		return true
-	}
-	// Net temporary errors
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Temporary() {
-		return true
-	}
-	return false
-}
 
 func (io *udpIOImpl) SendMessage(buf []byte, msg *protocol.UDPMessage) error {
 	msgN := msg.Serialize(buf)

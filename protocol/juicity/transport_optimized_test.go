@@ -31,12 +31,12 @@ func TestOptimizedEncryptDecryptCorrectness(t *testing.T) {
 		salt := make([]byte, conf.SaltLen)
 		fastrand.Read(salt)
 
-		encrypted, err := shadowsocks.EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
+		encrypted, err := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 		if err != nil {
 			t.Fatalf("Encryption failed at iteration %d: %v", i, err)
 		}
 
-		decrypted, err := shadowsocks.DecryptUDPFromPoolOptimized(key, encrypted, reusedInfo)
+		decrypted, err := shadowsocks.DecryptUDPFromPool(key, encrypted, reusedInfo)
 		if err != nil {
 			encrypted.Put()
 			t.Fatalf("Decryption failed at iteration %d: %v", i, err)
@@ -69,13 +69,13 @@ func TestOptimizedCacheEffectiveness(t *testing.T) {
 	plaintext := []byte("Cache test for juicity")
 	reusedInfo := ciphers.JuicityReusedInfo
 
-	encrypted1, err := shadowsocks.EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
+	encrypted1, err := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 	if err != nil {
 		t.Fatal(err)
 	}
 	encrypted1.Put()
 
-	encrypted2, err := shadowsocks.EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
+	encrypted2, err := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestOptimizedCacheEffectiveness(t *testing.T) {
 		t.Error("Cached encryption should produce same result")
 	}
 
-	decrypted, err := shadowsocks.DecryptUDPFromPoolOptimized(key, encrypted2, reusedInfo)
+	decrypted, err := shadowsocks.DecryptUDPFromPool(key, encrypted2, reusedInfo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,13 +120,13 @@ func TestOptimizedConcurrentAccess(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < 20; j++ {
-				encrypted, err := shadowsocks.EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
+				encrypted, err := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 				if err != nil {
 					errors <- err
 					return
 				}
 
-				decrypted, err := shadowsocks.DecryptUDPFromPoolOptimized(key, encrypted, reusedInfo)
+				decrypted, err := shadowsocks.DecryptUDPFromPool(key, encrypted, reusedInfo)
 				encrypted.Put()
 				if err != nil {
 					errors <- err
@@ -172,12 +172,12 @@ func TestOptimizedMemoryLeak(t *testing.T) {
 		salt := make([]byte, conf.SaltLen)
 		fastrand.Read(salt)
 
-		encrypted, err := shadowsocks.EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
+		encrypted, err := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		decrypted, err := shadowsocks.DecryptUDPFromPoolOptimized(key, encrypted, reusedInfo)
+		decrypted, err := shadowsocks.DecryptUDPFromPool(key, encrypted, reusedInfo)
 		encrypted.Put()
 		if err != nil {
 			t.Fatal(err)
@@ -220,12 +220,12 @@ func TestOptimizedPoolMemoryLeak(t *testing.T) {
 	runtime.ReadMemStats(&memBefore)
 
 	for i := 0; i < 10000; i++ {
-		encrypted, err := shadowsocks.EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
+		encrypted, err := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		decrypted, err := shadowsocks.DecryptUDPFromPoolOptimized(key, encrypted, reusedInfo)
+		decrypted, err := shadowsocks.DecryptUDPFromPool(key, encrypted, reusedInfo)
 		encrypted.Put()
 		if err != nil {
 			t.Fatal(err)
@@ -266,7 +266,7 @@ func BenchmarkJuicityEncrypt(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		encrypted, _ := shadowsocks.EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
+		encrypted, _ := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 		encrypted.Put()
 	}
 }
@@ -287,16 +287,16 @@ func BenchmarkJuicityDecrypt(b *testing.B) {
 	plaintext := make([]byte, 1400)
 	reusedInfo := ciphers.JuicityReusedInfo
 
-	encrypted, _ := shadowsocks.EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
+	encrypted, _ := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 	defer encrypted.Put()
 
-	decrypted, _ := shadowsocks.DecryptUDPFromPoolOptimized(key, encrypted, reusedInfo)
+	decrypted, _ := shadowsocks.DecryptUDPFromPool(key, encrypted, reusedInfo)
 	decrypted.Put()
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		buf, _ := shadowsocks.DecryptUDPFromPoolOptimized(key, encrypted, reusedInfo)
+		buf, _ := shadowsocks.DecryptUDPFromPool(key, encrypted, reusedInfo)
 		buf.Put()
 	}
 }
@@ -320,8 +320,8 @@ func BenchmarkJuicityEncryptDecrypt(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		encrypted, _ := shadowsocks.EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
-		decrypted, _ := shadowsocks.DecryptUDPFromPoolOptimized(key, encrypted, reusedInfo)
+		encrypted, _ := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
+		decrypted, _ := shadowsocks.DecryptUDPFromPool(key, encrypted, reusedInfo)
 		encrypted.Put()
 		decrypted.Put()
 	}
@@ -358,8 +358,8 @@ func BenchmarkJuicityVsOriginal(b *testing.B) {
 	b.Run("Optimized", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			encrypted, _ := shadowsocks.EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
-			decrypted, _ := shadowsocks.DecryptUDPFromPoolOptimized(key, encrypted, reusedInfo)
+			encrypted, _ := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
+			decrypted, _ := shadowsocks.DecryptUDPFromPool(key, encrypted, reusedInfo)
 			encrypted.Put()
 			decrypted.Put()
 		}
@@ -399,7 +399,7 @@ func BenchmarkJuicityMultipleSalts(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			salt := salts[i%numSalts]
-			encrypted, _ := shadowsocks.EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
+			encrypted, _ := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 			encrypted.Put()
 		}
 	})
@@ -428,8 +428,8 @@ func BenchmarkJuicityRealistic(b *testing.B) {
 			if i%100 == 0 {
 				fastrand.Read(salt)
 			}
-			encrypted, _ := shadowsocks.EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
-			decrypted, _ := shadowsocks.DecryptUDPFromPoolOptimized(key, encrypted, reusedInfo)
+			encrypted, _ := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
+			decrypted, _ := shadowsocks.DecryptUDPFromPool(key, encrypted, reusedInfo)
 			encrypted.Put()
 			decrypted.Put()
 		}
@@ -451,13 +451,13 @@ func TestTransportPacketConnOptimizedPath(t *testing.T) {
 	fastrand.Read(salt)
 	reusedInfo := ciphers.JuicityReusedInfo
 
-	encrypted, err := shadowsocks.EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
+	encrypted, err := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer encrypted.Put()
 
-	decrypted, err := shadowsocks.DecryptUDPFromPoolOptimized(key, encrypted, reusedInfo)
+	decrypted, err := shadowsocks.DecryptUDPFromPool(key, encrypted, reusedInfo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,12 +487,12 @@ func TestTransportPacketConnSimulatedReadWrite(t *testing.T) {
 
 		reusedInfo := ciphers.JuicityReusedInfo
 
-		encrypted, err := shadowsocks.EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
+		encrypted, err := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		decrypted, err := shadowsocks.DecryptUDPFromPoolOptimized(key, encrypted, reusedInfo)
+		decrypted, err := shadowsocks.DecryptUDPFromPool(key, encrypted, reusedInfo)
 		encrypted.Put()
 		if err != nil {
 			t.Fatal(err)
@@ -523,13 +523,13 @@ func TestTransportPacketConnTargetAddress(t *testing.T) {
 	fastrand.Read(salt)
 	reusedInfo := ciphers.JuicityReusedInfo
 
-	encrypted, err := shadowsocks.EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
+	encrypted, err := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer encrypted.Put()
 
-	decrypted, err := shadowsocks.DecryptUDPFromPoolOptimized(key, encrypted, reusedInfo)
+	decrypted, err := shadowsocks.DecryptUDPFromPool(key, encrypted, reusedInfo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +569,7 @@ func TestCacheExpiration(t *testing.T) {
 	plaintext := []byte("Cache expiration test")
 	reusedInfo := ciphers.JuicityReusedInfo
 
-	encrypted, err := shadowsocks.EncryptUDPFromPoolOptimized(key, plaintext, salt, reusedInfo)
+	encrypted, err := shadowsocks.EncryptUDPFromPool(key, plaintext, salt, reusedInfo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,7 +577,7 @@ func TestCacheExpiration(t *testing.T) {
 
 	time.Sleep(300 * time.Millisecond)
 
-	decrypted, err := shadowsocks.DecryptUDPFromPoolOptimized(key, encrypted, reusedInfo)
+	decrypted, err := shadowsocks.DecryptUDPFromPool(key, encrypted, reusedInfo)
 	if err != nil {
 		t.Fatal(err)
 	}

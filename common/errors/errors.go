@@ -9,6 +9,7 @@
 package errors
 
 import (
+	"context"
 	"errors"
 	"net"
 )
@@ -26,9 +27,10 @@ var (
 	ErrDNSTemporaryFailure = errors.New("temporary DNS failure")
 
 	// Stream Errors
-	ErrStreamExhausted = errors.New("too many open streams")
-	ErrClientClosing   = errors.New("client closed")
-	ErrOperationHold   = errors.New("hold on")
+	ErrStreamExhausted    = errors.New("too many open streams")
+	ErrClientClosed       = errors.New("client closed")
+	ErrClientClosing       = errors.New("client closing")
+	ErrOperationHold      = errors.New("hold on")
 )
 
 // ============================================================================
@@ -170,6 +172,28 @@ func ShouldRetryStreamOperation(err error) bool {
 // recoverable rather than if an operation should be retried.
 func IsRecoverableStreamError(err error) bool {
 	return ShouldRetryStreamOperation(err)
+}
+
+// IsTemporaryError checks if an error is temporary and should not close the connection.
+// This is used to distinguish between fatal and non-fatal network/context errors.
+func IsTemporaryError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Context timeout/cancelled are temporary
+	if errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled) {
+		return true
+	}
+
+	// Net temporary errors
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Temporary() {
+		return true
+	}
+
+	return false
 }
 
 // ============================================================================

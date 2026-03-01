@@ -122,7 +122,6 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 				return
 			}
 		}
-		//log.Warn("salt: %v", hex.EncodeToString(salt))
 		subKey := getSubKey(c.cipherConf.KeyLen)
 		defer putSubKey(subKey)
 		kdf := hkdf.New(
@@ -170,13 +169,11 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 func (c *TCPConn) readChunkFromPool() ([]byte, error) {
 	bufLen := pool.Get(2 + c.cipherConf.TagLen)
 	defer pool.Put(bufLen)
-	//log.Warn("len(bufLen): %v, c.nonceRead: %v", len(bufLen), c.nonceRead)
 	if _, err := io.ReadFull(c.Conn, bufLen); err != nil {
 		return nil, err
 	}
 	bLenPayload, err := c.cipherRead.Open(bufLen[:0], c.nonceRead, bufLen, nil)
 	if err != nil {
-		//log.Warn("read length of payload: %v: %v", protocol.ErrFailAuth, err)
 		return nil, protocol.ErrFailAuth
 	}
 	common.BytesIncLittleEndian(c.nonceRead)
@@ -187,7 +184,6 @@ func (c *TCPConn) readChunkFromPool() ([]byte, error) {
 	}
 	payload, err := c.cipherRead.Open(bufPayload[:0], c.nonceRead, bufPayload, nil)
 	if err != nil {
-		//log.Warn("read payload: %v: %v", protocol.ErrFailAuth, err)
 		return nil, protocol.ErrFailAuth
 	}
 	common.BytesIncLittleEndian(c.nonceRead)
@@ -244,7 +240,6 @@ func (c *TCPConn) initWriteFromPool(b []byte) (buf []byte, offset int, toWrite [
 	if c.bloom != nil {
 		c.bloom.ExistOrAdd(buf[:c.cipherConf.SaltLen])
 	}
-	//log.Trace("salt(%p): %v", &b, hex.EncodeToString(buf[:c.cipherConf.SaltLen]))
 	return buf, offset, toWrite, nil
 }
 
@@ -271,7 +266,6 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 		return 0, fmt.Errorf("%v: %w", ErrFailInitCipher, err)
 	}
 	c.seal(buf[offset:], toPack)
-	//log.Trace("to write(%p): %v", &b, hex.EncodeToString(buf[:c.cipherConf.SaltLen]))
 	_, err = c.Conn.Write(buf)
 	if err != nil {
 		return 0, err

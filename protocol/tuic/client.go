@@ -175,8 +175,7 @@ func (t *clientImpl) handleMessage(quicConn quic.Connection) (err error) {
 		// QUIC's keepalive mechanism will handle connection health
 		message, err := quicConn.ReceiveDatagram(context.Background())
 		if err != nil {
-			// Retry on temporary errors (timeout, network glitch, etc.)
-			if common.IsTemporaryError(err) {
+		if outbounderrors.IsTemporaryError(err) {
 				continue
 			}
 			return err
@@ -223,9 +222,8 @@ func (t *clientImpl) handleMessage(quicConn quic.Connection) (err error) {
 
 func (t *clientImpl) deferQuicConn(quicConn quic.Connection, err error) {
 	// Only close connection on non-temporary errors
-	// 🚀 Fast path: direct comparison (1.19 ns per check)
 	if err != nil &&
-		!common.IsTemporaryError(err) &&
+		!outbounderrors.IsTemporaryError(err) &&
 		err != outbounderrors.ErrStreamExhausted {
 		t.forceClose(quicConn, err)
 	}

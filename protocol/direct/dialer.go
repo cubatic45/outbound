@@ -96,7 +96,6 @@ func (d *directDialer) tryRetry(err error, addr string, callback func()) {
 
 	// addr is domain
 	if err != nil {
-		// 🚀 Fast path: direct comparison (1.19 ns)
 		if err == outbounderrors.ErrDNSTimeout {
 			callback()
 		}
