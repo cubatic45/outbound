@@ -14,6 +14,10 @@ import (
 // handling buffered data (e.g., ConnSniffer).
 type SpliceFunc func(dstFD, srcFD int, limit int64) (int64, error)
 
+type syscallConn interface {
+	SyscallConn() (syscall.RawConn, error)
+}
+
 // RawSplice is the low-level splice implementation, exported for
 // advanced use cases. It performs zero-copy data transfer between
 // two file descriptors using the splice syscall.
@@ -25,49 +29,43 @@ func RawSplice(dstFD, srcFD int, limit int64) (int64, error) {
 // Returns (bytesTransferred, usedSplice, error).
 // If splice is not available, it returns (0, false, nil) to indicate
 // the caller should fall back to io.Copy.
-func SpliceTo(dst io.Writer, srcConn interface{ SyscallConn() (syscall.RawConn, error) }) (int64, bool, error) {
-	// Check if dst supports SyscallConn
-	dstConn, ok := dst.(interface {
-		SyscallConn() (syscall.RawConn, error)
-	})
+func SpliceTo(dst io.Writer, srcConn interface {
+	SyscallConn() (syscall.RawConn, error)
+}) (int64, bool, error) {
+	dstFD, srcFD, ok, err := spliceFDs(dst, srcConn)
 	if !ok {
 		return 0, false, nil
 	}
-
-	// Get raw connections
-	rawDst, err := dstConn.SyscallConn()
 	if err != nil {
 		return 0, false, err
 	}
 
-	rawSrc, err := srcConn.SyscallConn()
+	return spliceFDToEOF(dstFD, srcFD)
+}
+
+func spliceFDs(dst io.Writer, src syscallConn) (dstFD int, srcFD int, ok bool, err error) {
+	dstConn, ok := dst.(syscallConn)
+	if !ok {
+		return 0, 0, false, nil
+	}
+	dstFD, err = fdFromConn(dstConn)
 	if err != nil {
-		return 0, false, err
+		return 0, 0, false, err
 	}
-
-	var dstFD, srcFD int
-	var errDst, errSrc error
-
-	// Extract file descriptors
-	rawDst.Control(func(fd uintptr) {
-		dstFD = int(fd)
-	})
-	rawSrc.Control(func(fd uintptr) {
-		srcFD = int(fd)
-	})
-
-	if errDst != nil || errSrc != nil {
-		return 0, false, nil
+	srcFD, err = fdFromConn(src)
+	if err != nil {
+		return 0, 0, false, err
 	}
+	return dstFD, srcFD, true, nil
+}
 
-	// Try direct splice first.
-	n, err := spliceDirect(dstFD, srcFD, spliceToEOFLimit) // Transfer until EOF
+func spliceFDToEOF(dstFD, srcFD int) (int64, bool, error) {
+	n, err := spliceDirect(dstFD, srcFD, spliceToEOFLimit)
 	if err == nil {
 		return n, true, nil
 	}
 	total := n
 
-	// socket->socket splice often needs a pipe as intermediary.
 	n, err = spliceViaPipe(dstFD, srcFD, spliceToEOFLimit)
 	total += n
 	if err == nil {
@@ -101,12 +99,8 @@ const (
 
 // canSplice checks if both connections support splice operation
 func canSplice(dst, src interface{}) bool {
-	_, dstOk := dst.(interface {
-		SyscallConn() (syscall.RawConn, error)
-	})
-	_, srcOk := src.(interface {
-		SyscallConn() (syscall.RawConn, error)
-	})
+	_, dstOk := dst.(syscallConn)
+	_, srcOk := src.(syscallConn)
 	return dstOk && srcOk
 }
 
@@ -211,7 +205,7 @@ func spliceViaPipe(dstFD, srcFD int, limit int64) (int64, error) {
 	return total, nil
 }
 
-func fdFromConn(c interface{ SyscallConn() (syscall.RawConn, error) }) (int, error) {
+func fdFromConn(c syscallConn) (int, error) {
 	raw, err := c.SyscallConn()
 	if err != nil {
 		return 0, err
@@ -226,93 +220,21 @@ func fdFromConn(c interface{ SyscallConn() (syscall.RawConn, error) }) (int, err
 // ReadFrom implements io.ReaderFrom with zero-copy optimization
 // This is the optimized version for Linux systems
 func ReadFrom(dst Conn, src io.Reader) (int64, error) {
-	var total int64
-
-	// Try zero-copy splice first
-	if canSplice(dst, src) {
-		dstSC := dst.(interface {
-			SyscallConn() (syscall.RawConn, error)
-		})
-		srcSC := src.(interface {
-			SyscallConn() (syscall.RawConn, error)
-		})
-
-		dstFD, err := fdFromConn(dstSC)
-		if err != nil {
-			goto fallback
+	if srcConn, ok := src.(syscallConn); ok {
+		if n, usedSplice, err := SpliceTo(dst, srcConn); usedSplice {
+			return n, err
 		}
-		srcFD, err := fdFromConn(srcSC)
-		if err != nil {
-			goto fallback
-		}
-
-		// Perform zero-copy transfer
-		n, err := splice(dstFD, srcFD, spliceToEOFLimit)
-		if err == nil {
-			return n, nil
-		}
-		total += n
-
-		// Try robust pipe relay before userspace copy fallback.
-		n, err = spliceViaPipe(dstFD, srcFD, spliceToEOFLimit)
-		if err == nil {
-			return total + n, nil
-		}
-		if n > 0 {
-			return total + n, err
-		}
-		total += n
 	}
-
-fallback:
-	// Standard copy fallback
-	n, err := io.Copy(dst, src)
-	return total + n, err
+	return io.Copy(dst, src)
 }
 
 // WriteTo implements io.WriterTo with zero-copy optimization
 // This is the optimized version for Linux systems
 func WriteTo(src Conn, dst io.Writer) (int64, error) {
-	var total int64
-
-	// Try zero-copy splice first
-	if canSplice(dst, src) {
-		dstSC := dst.(interface {
-			SyscallConn() (syscall.RawConn, error)
-		})
-		srcSC := src.(interface {
-			SyscallConn() (syscall.RawConn, error)
-		})
-
-		dstFD, err := fdFromConn(dstSC)
-		if err != nil {
-			goto fallback
+	if srcConn, ok := src.(syscallConn); ok {
+		if n, usedSplice, err := SpliceTo(dst, srcConn); usedSplice {
+			return n, err
 		}
-		srcFD, err := fdFromConn(srcSC)
-		if err != nil {
-			goto fallback
-		}
-
-		// Perform zero-copy transfer
-		n, err := splice(dstFD, srcFD, spliceToEOFLimit)
-		if err == nil {
-			return n, nil
-		}
-		total += n
-
-		// Try robust pipe relay before userspace copy fallback.
-		n, err = spliceViaPipe(dstFD, srcFD, spliceToEOFLimit)
-		if err == nil {
-			return total + n, nil
-		}
-		if n > 0 {
-			return total + n, err
-		}
-		total += n
 	}
-
-fallback:
-	// Standard copy fallback
-	n, err := io.Copy(dst, src)
-	return total + n, err
+	return io.Copy(dst, src)
 }
