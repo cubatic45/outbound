@@ -19,7 +19,6 @@ import (
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
-	poolBytes "github.com/daeuniverse/outbound/pool/bytes"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/socks5"
 	disk_bloom "github.com/mzz2017/disk-bloom"
@@ -177,10 +176,23 @@ func (c *UdpConn) evictOldestIfNeeded() {
 	}
 }
 
-func (c *UdpConn) writeIdentityHeader(buf *poolBytes.Buffer, separateHeader []byte) error {
+func (c *UdpConn) estimateIdentityHeaderLen() int {
+	if !c.hasMultiPSK {
+		return 0
+	}
+	if udpMultiPSKAggressiveOptimization && c.identityHeaderSent.Load() {
+		return 0
+	}
+	if cached, ok := c.identityHeaderCache.Load().([]byte); ok {
+		return len(cached)
+	}
+	return len(c.cachedIdentityComponents) * aes.BlockSize
+}
+
+func (c *UdpConn) writeIdentityHeader(dst []byte, separateHeader []byte) (int, error) {
 	// Fast path: single PSK - no identity header needed
 	if !c.hasMultiPSK {
-		return nil
+		return 0, nil
 	}
 
 	// Aggressive optimization mode: send identity header only once
@@ -189,7 +201,7 @@ func (c *UdpConn) writeIdentityHeader(buf *poolBytes.Buffer, separateHeader []by
 	if udpMultiPSKAggressiveOptimization {
 		if c.identityHeaderSent.Load() {
 			// Identity header already sent, skip for subsequent packets
-			return nil
+			return 0, nil
 		}
 
 		// Send identity header for the first packet and cache it
@@ -198,114 +210,105 @@ func (c *UdpConn) writeIdentityHeader(buf *poolBytes.Buffer, separateHeader []by
 
 		// Double-check after acquiring lock
 		if c.identityHeaderSent.Load() {
-			return nil
+			return 0, nil
 		}
 
-		// Generate and cache the identity header
-		var cachedHeader []byte
-		headerBuf := pool.GetBuffer()
-		defer pool.PutBuffer(headerBuf)
-
+		// Generate and cache the identity header.
+		cachedHeader := make([]byte, len(c.cachedIdentityComponents)*aes.BlockSize)
+		offset := 0
 		for i := 0; i < len(c.cachedIdentityComponents); i++ {
-			identityHeader := pool.Get(aes.BlockSize)
-			subtle.XORBytes(identityHeader, c.cachedIdentityComponents[i], separateHeader)
+			header := cachedHeader[offset : offset+aes.BlockSize]
+			subtle.XORBytes(header, c.cachedIdentityComponents[i], separateHeader)
 			b, err := c.cipherConf.NewBlockCipher(c.pskList[i])
 			if err != nil {
-				pool.Put(identityHeader)
-				return err
+				return 0, err
 			}
-			b.Encrypt(identityHeader, identityHeader)
-			headerBuf.Write(identityHeader)
-			pool.Put(identityHeader)
+			b.Encrypt(header, header)
+			offset += aes.BlockSize
 		}
 
-		// Cache the header for reuse
-		cachedHeader = make([]byte, headerBuf.Len())
-		copy(cachedHeader, headerBuf.Bytes())
 		c.identityHeaderCache.Store(cachedHeader)
-		buf.Write(cachedHeader)
 		c.identityHeaderSent.Store(true)
-		return nil
+		if len(dst) < len(cachedHeader) {
+			return 0, io.ErrShortBuffer
+		}
+		copy(dst, cachedHeader)
+		return len(cachedHeader), nil
 	}
 
 	// Conservative mode: optimized multi-PSK with pre-computed hash components
 	// Still sends identity header every packet, but avoids BLAKE3 recomputation
+	headerLen := len(c.cachedIdentityComponents) * aes.BlockSize
+	if len(dst) < headerLen {
+		return 0, io.ErrShortBuffer
+	}
+	offset := 0
 	for i := 0; i < len(c.cachedIdentityComponents); i++ {
-		identityHeader := pool.Get(aes.BlockSize)
-		defer pool.Put(identityHeader)
-
-		// Use cached hash component instead of recomputing BLAKE3
-		subtle.XORBytes(identityHeader, c.cachedIdentityComponents[i], separateHeader)
+		header := dst[offset : offset+aes.BlockSize]
+		subtle.XORBytes(header, c.cachedIdentityComponents[i], separateHeader)
 		b, err := c.cipherConf.NewBlockCipher(c.pskList[i])
 		if err != nil {
-			return err
+			return 0, err
 		}
-		b.Encrypt(identityHeader, identityHeader)
-		buf.Write(identityHeader)
+		b.Encrypt(header, header)
+		offset += aes.BlockSize
 	}
-	return nil
+	return headerLen, nil
 }
 
 func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
-	buf := pool.GetBuffer()
-	defer pool.PutBuffer(buf)
-
-	separateHeader := pool.GetBuffer()
-	defer pool.PutBuffer(separateHeader)
-
 	packetID := c.nextPacketID()
+	var separateHeader [16]byte
+	copy(separateHeader[:8], c.sessionID[:])
+	binary.BigEndian.PutUint64(separateHeader[8:], packetID)
 
-	separateHeader.Write(c.sessionID[:])
-	binary.Write(separateHeader, binary.BigEndian, packetID)
+	var separateHeaderEncrypted [16]byte
+	c.blockCipherEncrypt.Encrypt(separateHeaderEncrypted[:], separateHeader[:])
 
-	separateHeaderEncrypted := pool.Get(16)
-	defer pool.Put(separateHeaderEncrypted)
-	c.blockCipherEncrypt.Encrypt(separateHeaderEncrypted, separateHeader.Bytes())
+	addrInfo, err := socks5.AddressFromString(addr)
+	if err != nil {
+		return 0, oops.Wrapf(err, "fail to parse target address")
+	}
+	addrLen, err := addrInfoEncodedLen(addrInfo)
+	if err != nil {
+		return 0, oops.Wrapf(err, "fail to calculate address length")
+	}
+	messageLen := 1 + 8 + 2 + addrLen + len(b)
+	totalPacketLen := len(separateHeaderEncrypted) + c.estimateIdentityHeaderLen() + messageLen + c.cipherConf.TagLen
+	packet := pool.Get(totalPacketLen)
+	defer pool.Put(packet)
+	offset := 0
+	copy(packet[offset:], separateHeaderEncrypted[:])
+	offset += len(separateHeaderEncrypted)
 
-	buf.Write(separateHeaderEncrypted)
-
-	err := c.writeIdentityHeader(buf, separateHeader.Bytes())
+	identityHeaderLen, err := c.writeIdentityHeader(packet[offset:], separateHeader[:])
 	if err != nil {
 		return 0, oops.Wrapf(err, "fail to write identity header")
 	}
+	offset += identityHeaderLen
 
-	message, err := EncodeMessage(HeaderTypeClientStream, uint64(time.Now().Unix()), addr, b)
-	defer pool.PutBuffer(message)
+	messageOffset := offset
+	message := packet[messageOffset : messageOffset+messageLen]
+	message[0] = HeaderTypeClientStream
+	binary.BigEndian.PutUint64(message[1:9], uint64(time.Now().Unix()))
+	// No padding.
+	binary.BigEndian.PutUint16(message[9:11], 0)
+	addrWritten, err := writeAddrInfoTo(message[11:], addrInfo)
 	if err != nil {
-		return 0, oops.Wrapf(err, "fail to encode message")
+		return 0, oops.Wrapf(err, "fail to encode target address")
 	}
+	copy(message[11+addrWritten:], b)
 
 	// Encrypt and send
 	// Optimized: Use cached cipher for session reuse
-	cipher, err := GetCachedCipher(c.uPSK, separateHeader.Bytes()[:8], c.cipherConf, true)
+	cipher, err := GetCachedCipher(c.uPSK, separateHeader[:8], c.cipherConf, true)
 	if err != nil {
 		return 0, err
 	}
-	buf.Write(cipher.Seal(nil, separateHeader.Bytes()[4:16], message.Bytes(), nil))
+	packet = cipher.Seal(packet[:messageOffset], separateHeader[4:16], message, nil)
 
-	_, err = c.Conn.Write(buf.Bytes())
+	_, err = c.Conn.Write(packet)
 	return len(b), err
-}
-
-func EncodeMessage(typ uint8, timestamp uint64, address string, b []byte) (*poolBytes.Buffer, error) {
-	message := pool.GetBuffer()
-	// Header
-	message.WriteByte(typ)
-	binary.Write(message, binary.BigEndian, timestamp)
-	// No padding
-	binary.Write(message, binary.BigEndian, uint16(0))
-	// Socks Address
-	addrInfo, err := socks5.AddressFromString(address)
-	if err != nil {
-		return nil, err
-	}
-	if err := socks5.WriteAddrInfo(addrInfo, message); err != nil {
-		return nil, err
-	}
-	// Payload
-	message.Write(b)
-
-	return message, nil
 }
 
 func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
