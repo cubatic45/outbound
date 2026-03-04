@@ -81,14 +81,16 @@ func GetZero(size int) []byte {
 }
 
 func Put(buf []byte) {
-	if size := cap(buf); size >= minsize {
-		if size > maxsize {
-			size = maxsize
-		}
-		// find the largest bucket i such that 1<<i <= size
-		i := bits.Len32(uint32(size)) - 1
-		if i < num {
-			pools[i].Put(buf)
-		}
+	size := cap(buf)
+	if size < minsize || size > maxsize {
+		// Strictly avoid returning oversize huge buffers to prevent memory leak/retention.
+		// Small buffers are also directly discarded.
+		return
+	}
+	
+	// find the largest bucket i such that 1<<i <= size
+	i := bits.Len32(uint32(size)) - 1
+	if i < num {
+		pools[i].Put(buf)
 	}
 }
