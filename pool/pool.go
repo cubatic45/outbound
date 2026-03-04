@@ -81,8 +81,12 @@ func GetZero(size int) []byte {
 }
 
 func Put(buf []byte) {
-	if size := cap(buf); size >= 1 && size <= maxsize {
-		i := GetClosestN(size)
+	if size := cap(buf); size >= minsize {
+		if size > maxsize {
+			size = maxsize
+		}
+		// find the largest bucket i such that 1<<i <= size
+		i := bits.Len32(uint32(size)) - 1
 		if i < num {
 			pools[i].Put(buf)
 		}
