@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 	"time"
 
@@ -73,17 +74,37 @@ func NewConn(conn netproxy.Conn, metadata Metadata, password string) (c *Conn, e
 	return c, nil
 }
 
-func (c *Conn) reqHeaderFromPool(payload []byte) (buf []byte) {
+func (c *Conn) reqHeaderFromPool() (buf []byte) {
 	reqLen := c.metadata.Len()
-	buf = pool.Get(56 + 2 + 1 + reqLen + 2 + len(payload))
+	buf = pool.Get(56 + 2 + 1 + reqLen + 2)
 	copy(buf, c.pass[:])
 	copy(buf[56:], CRLF)
 	buf[58] = NetworkToByte(c.metadata.Network)
 	c.metadata.PackTo(buf[59:])
 	copy(buf[59+reqLen:], CRLF)
-	copy(buf[61+reqLen:], payload)
 
 	return buf
+}
+
+func (c *Conn) writeRequestHeader(payload []byte) (n int, err error) {
+	header := c.reqHeaderFromPool()
+	defer pool.Put(header)
+
+	buffers := net.Buffers{header}
+	if len(payload) > 0 {
+		buffers = append(buffers, payload)
+	}
+	written, err := buffers.WriteTo(c.Conn)
+	if err != nil {
+		if written <= int64(len(header)) {
+			return 0, fmt.Errorf("write header: %w", err)
+		}
+		return int(written) - len(header), fmt.Errorf("write header: %w", err)
+	}
+	if written < int64(len(header)) {
+		return 0, fmt.Errorf("write header: %w", io.ErrShortWrite)
+	}
+	return int(written) - len(header), nil
 }
 
 func (c *Conn) Write(b []byte) (n int, err error) {
@@ -91,13 +112,12 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	defer c.writeMutex.Unlock()
 	if !c.onceWrite {
 		if c.metadata.IsClient {
-			buf := c.reqHeaderFromPool(b)
-			defer pool.Put(buf)
-			if _, err = c.Conn.Write(buf); err != nil {
-				return 0, fmt.Errorf("write header: %w", err)
+			n, err = c.writeRequestHeader(b)
+			if err != nil {
+				return n, err
 			}
 			c.onceWrite = true
-			return len(b), nil
+			return n, nil
 		}
 	}
 	return c.Conn.Write(b)
