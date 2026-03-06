@@ -43,6 +43,13 @@ type FakeNetConn struct {
 	RAddr net.Addr
 }
 
+func (conn *FakeNetConn) UnderlyingConn() net.Conn {
+	if underlying, ok := conn.Conn.(net.Conn); ok {
+		return underlying
+	}
+	return nil
+}
+
 func (conn *FakeNetConn) LocalAddr() net.Addr {
 	return conn.LAddr
 }
