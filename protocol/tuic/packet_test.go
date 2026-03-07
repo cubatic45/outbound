@@ -1,6 +1,8 @@
 package tuic
 
 import (
+	"errors"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -119,5 +121,17 @@ func TestConcurrentPushClose(t *testing.T) {
 	_, closed := p.PopFrontBlock()
 	if !closed {
 		t.Error("expected closed after Close")
+	}
+}
+
+func TestQuicStreamPacketConnWriteToAfterClose(t *testing.T) {
+	q := &quicStreamPacketConn{}
+
+	if err := q.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	if _, err := q.WriteTo([]byte("test"), "127.0.0.1:53"); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("expected net.ErrClosed after Close, got %v", err)
 	}
 }

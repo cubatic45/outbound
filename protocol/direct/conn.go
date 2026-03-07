@@ -3,16 +3,20 @@ package direct
 import (
 	"net"
 	"net/netip"
+	"sync"
 	"syscall"
 
 	"github.com/daeuniverse/outbound/common"
 )
+
+var resolveUDPAddr = common.ResolveUDPAddr
 
 type directPacketConn struct {
 	*net.UDPConn
 	FullCone      bool
 	dialTgt       string
 	cachedDialTgt netip.AddrPort
+	cacheMu       sync.Mutex
 	resolver      *net.Resolver
 }
 
@@ -52,14 +56,18 @@ func (c *directPacketConn) Write(b []byte) (int, error) {
 	if !c.FullCone {
 		return c.UDPConn.Write(b)
 	}
+	c.cacheMu.Lock()
 	if !c.cachedDialTgt.IsValid() {
-		ua, err := common.ResolveUDPAddr(c.resolver, c.dialTgt)
+		ua, err := resolveUDPAddr(c.resolver, c.dialTgt)
 		if err != nil {
+			c.cacheMu.Unlock()
 			return 0, err
 		}
 		c.cachedDialTgt = ua.AddrPort()
 	}
-	return c.UDPConn.WriteToUDPAddrPort(b, c.cachedDialTgt)
+	target := c.cachedDialTgt
+	c.cacheMu.Unlock()
+	return c.UDPConn.WriteToUDPAddrPort(b, target)
 }
 
 func (c *directPacketConn) Read(b []byte) (int, error) {

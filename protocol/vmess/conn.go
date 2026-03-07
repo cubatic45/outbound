@@ -18,6 +18,8 @@ import (
 	"github.com/daeuniverse/outbound/pool"
 )
 
+var resolveUDPAddr = net.ResolveUDPAddr
+
 const (
 	MaxChunkSize = 1 << 14
 	MaxUDPSize   = 1 << 11
@@ -33,6 +35,7 @@ type Conn struct {
 	cmdKey          []byte
 	dialTgt         string
 	dialTgtAddrPort netip.AddrPort // lazy resolve
+	dialTgtMu       sync.Mutex
 
 	NewAEAD func(key []byte) (cipher.AEAD, error)
 
@@ -93,6 +96,22 @@ func (c *Conn) Close() error {
 	c.writeSealFrame = nil
 	c.writeMutex.Unlock()
 	return c.Conn.Close()
+}
+
+func (c *Conn) dialTargetAddrPort() (netip.AddrPort, error) {
+	c.dialTgtMu.Lock()
+	defer c.dialTgtMu.Unlock()
+
+	if c.dialTgtAddrPort.IsValid() {
+		return c.dialTgtAddrPort, nil
+	}
+
+	tgt, err := resolveUDPAddr("udp", c.dialTgt)
+	if err != nil {
+		return netip.AddrPort{}, err
+	}
+	c.dialTgtAddrPort = tgt.AddrPort()
+	return c.dialTgtAddrPort, nil
 }
 
 func (c *Conn) chunks(size int) (payloadSize int, numChunks int) {
@@ -236,14 +255,11 @@ func (c *Conn) WriteReqHeader() (err error) {
 
 func (c *Conn) Write(b []byte) (n int, err error) {
 	if c.metadata.IsPacketAddr() {
-		if !c.dialTgtAddrPort.IsValid() {
-			tgt, err := net.ResolveUDPAddr("udp", c.dialTgt)
-			if err != nil {
-				return 0, err
-			}
-			c.dialTgtAddrPort = tgt.AddrPort()
+		tgt, err := c.dialTargetAddrPort()
+		if err != nil {
+			return 0, err
 		}
-		return c.WriteTo(b, c.dialTgtAddrPort.String())
+		return c.WriteTo(b, tgt.String())
 	} else {
 		return c.write(b)
 	}

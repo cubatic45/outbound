@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
@@ -22,7 +23,7 @@ type Packets struct {
 	list             *list.List
 	isEmptyState     context.Context
 	cancelEmptyState func()
-	closed           bool
+	closed           atomic.Bool
 }
 
 func NewPackets() *Packets {
@@ -48,7 +49,7 @@ func (p *Packets) PushBack(packet *Packet) {
 
 func (p *Packets) PopFrontBlock() (packet *Packet, closed bool) {
 	<-p.isEmptyState.Done()
-	if p.closed {
+	if p.closed.Load() {
 		return nil, true
 	}
 	p.mu.Lock()
@@ -67,10 +68,10 @@ func (p *Packets) setEmpty() {
 func (p *Packets) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.closed {
+	if p.closed.Load() {
 		return nil
 	}
-	p.closed = true
+	p.closed.Store(true)
 	select {
 	case <-p.isEmptyState.Done():
 	default:
@@ -96,7 +97,7 @@ type quicStreamPacketConn struct {
 
 	closeOnce sync.Once
 	closeErr  error
-	closed    bool
+	closed    atomic.Bool
 
 	// TODO: multiple defraggers for different PKT_ID
 	deFraggers sync.Map
@@ -107,7 +108,7 @@ type quicStreamPacketConn struct {
 
 func (q *quicStreamPacketConn) Close() error {
 	q.closeOnce.Do(func() {
-		q.closed = true
+		q.closed.Store(true)
 		q.closeErr = q.close()
 	})
 	return q.closeErr
@@ -210,7 +211,7 @@ func (q *quicStreamPacketConn) WriteTo(p []byte, addr string) (n int, err error)
 	if len(p) > 0xffff { // uint16 max
 		return 0, &quic.DatagramTooLargeError{MaxDataLen: 0xffff}
 	}
-	if q.closed {
+	if q.closed.Load() {
 		return 0, net.ErrClosed
 	}
 	if q.deferQuicConnFn != nil {

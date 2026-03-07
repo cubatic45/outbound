@@ -35,6 +35,7 @@ type udpConn struct {
 	CloseFunc func()
 	Closed    bool
 
+	writeMu sync.Mutex
 	muTimer sync.Mutex
 	timer   *time.Timer
 	target  string
@@ -70,6 +71,9 @@ func (u *udpConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
 }
 
 func (u *udpConn) WriteTo(b []byte, addr string) (n int, err error) {
+	u.writeMu.Lock()
+	defer u.writeMu.Unlock()
+
 	// Try no frag first
 	msg := &protocol.UDPMessage{
 		SessionID: u.ID,
@@ -207,6 +211,7 @@ func (m *udpSessionManager) NewUDP(addr string) (netproxy.Conn, error) {
 		SendBuf:   make([]byte, protocol.MaxUDPSize),
 		SendFunc:  m.io.SendMessage,
 
+		writeMu: sync.Mutex{},
 		muTimer: sync.Mutex{},
 		target:  addr,
 	}
