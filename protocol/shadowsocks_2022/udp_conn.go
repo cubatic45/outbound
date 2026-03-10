@@ -1,7 +1,6 @@
 package shadowsocks_2022
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/subtle"
@@ -10,8 +9,6 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"os"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,17 +23,6 @@ import (
 	"lukechampine.com/blake3"
 )
 
-// Global option to control multi-PSK UDP optimization
-// Set env var SS2022_UDP_MULTI_PSK_OPTIMIZATION=1 to enable aggressive optimization
-// (send identity header only once, similar to TCP behavior)
-var udpMultiPSKAggressiveOptimization = func() bool {
-	if val := os.Getenv("SS2022_UDP_MULTI_PSK_OPTIMIZATION"); val != "" {
-		if enabled, err := strconv.ParseBool(val); err == nil {
-			return enabled
-		}
-	}
-	return false // Default: conservative mode (send identity header every packet)
-}()
 
 type UdpConn struct {
 	net.Conn
@@ -55,6 +41,7 @@ type UdpConn struct {
 	replayWindow sync.Map
 
 	cachedIdentityComponents [][]byte
+	cachedIdentityBlocks     []cipher.Block
 	identityHeaderCache      atomic.Value
 	identityHeaderMutex      sync.Mutex
 	hasMultiPSK              bool
@@ -90,12 +77,18 @@ func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf2022, blockCipherEncrypt 
 	// This cache stores BLAKE3 hashes of each PSK for fast identity header generation
 	if u.hasMultiPSK {
 		u.cachedIdentityComponents = make([][]byte, len(pskList)-1)
+		u.cachedIdentityBlocks = make([]cipher.Block, len(pskList)-1)
 		for i := 0; i < len(pskList)-1; i++ {
 			hash := blake3.Sum512(pskList[i+1])
 			// Store first aes.BlockSize (16) bytes of the hash
 			component := make([]byte, aes.BlockSize)
 			copy(component, hash[:aes.BlockSize])
 			u.cachedIdentityComponents[i] = component
+			block, err := conf.NewBlockCipher(pskList[i])
+			if err != nil {
+				return nil, err
+			}
+			u.cachedIdentityBlocks[i] = block
 		}
 	}
 
@@ -180,7 +173,8 @@ func (c *UdpConn) estimateIdentityHeaderLen() int {
 	if !c.hasMultiPSK {
 		return 0
 	}
-	if udpMultiPSKAggressiveOptimization && c.identityHeaderSent.Load() {
+	// Aggressive optimization: send identity header only once per UdpConn
+	if c.identityHeaderSent.Load() {
 		return 0
 	}
 	if cached, ok := c.identityHeaderCache.Load().([]byte); ok {
@@ -195,65 +189,38 @@ func (c *UdpConn) writeIdentityHeader(dst []byte, separateHeader []byte) (int, e
 		return 0, nil
 	}
 
-	// Aggressive optimization mode: send identity header only once
+	// Aggressive optimization: send identity header only once per UdpConn
 	// This matches TCP behavior and significantly reduces per-packet overhead
-	// Use with caution: requires server-side compatibility
-	if udpMultiPSKAggressiveOptimization {
-		if c.identityHeaderSent.Load() {
-			// Identity header already sent, skip for subsequent packets
-			return 0, nil
-		}
-
-		// Send identity header for the first packet and cache it
-		c.identityHeaderMutex.Lock()
-		defer c.identityHeaderMutex.Unlock()
-
-		// Double-check after acquiring lock
-		if c.identityHeaderSent.Load() {
-			return 0, nil
-		}
-
-		// Generate and cache the identity header.
-		cachedHeader := make([]byte, len(c.cachedIdentityComponents)*aes.BlockSize)
-		offset := 0
-		for i := 0; i < len(c.cachedIdentityComponents); i++ {
-			header := cachedHeader[offset : offset+aes.BlockSize]
-			subtle.XORBytes(header, c.cachedIdentityComponents[i], separateHeader)
-			b, err := c.cipherConf.NewBlockCipher(c.pskList[i])
-			if err != nil {
-				return 0, err
-			}
-			b.Encrypt(header, header)
-			offset += aes.BlockSize
-		}
-
-		c.identityHeaderCache.Store(cachedHeader)
-		c.identityHeaderSent.Store(true)
-		if len(dst) < len(cachedHeader) {
-			return 0, io.ErrShortBuffer
-		}
-		copy(dst, cachedHeader)
-		return len(cachedHeader), nil
+	if c.identityHeaderSent.Load() {
+		return 0, nil
 	}
 
-	// Conservative mode: optimized multi-PSK with pre-computed hash components
-	// Still sends identity header every packet, but avoids BLAKE3 recomputation
-	headerLen := len(c.cachedIdentityComponents) * aes.BlockSize
-	if len(dst) < headerLen {
-		return 0, io.ErrShortBuffer
+	// Send identity header for the first packet and cache it
+	c.identityHeaderMutex.Lock()
+	defer c.identityHeaderMutex.Unlock()
+
+	// Double-check after acquiring lock
+	if c.identityHeaderSent.Load() {
+		return 0, nil
 	}
+
+	// Generate and cache the identity header
+	cachedHeader := make([]byte, len(c.cachedIdentityComponents)*aes.BlockSize)
 	offset := 0
 	for i := 0; i < len(c.cachedIdentityComponents); i++ {
-		header := dst[offset : offset+aes.BlockSize]
+		header := cachedHeader[offset : offset+aes.BlockSize]
 		subtle.XORBytes(header, c.cachedIdentityComponents[i], separateHeader)
-		b, err := c.cipherConf.NewBlockCipher(c.pskList[i])
-		if err != nil {
-			return 0, err
-		}
-		b.Encrypt(header, header)
+		c.cachedIdentityBlocks[i].Encrypt(header, header)
 		offset += aes.BlockSize
 	}
-	return headerLen, nil
+
+	c.identityHeaderCache.Store(cachedHeader)
+	c.identityHeaderSent.Store(true)
+	if len(dst) < len(cachedHeader) {
+		return 0, io.ErrShortBuffer
+	}
+	copy(dst, cachedHeader)
+	return len(cachedHeader), nil
 }
 
 func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
@@ -342,59 +309,85 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 		return 0, netip.AddrPort{}, err
 	}
 
-	// Use bytes.Reader to simplify parsing
-	reader := bytes.NewReader(payload)
+	return parseDecryptedPayload(payload, b, now)
+}
 
-	// Read header type
-	var typ uint8
-	if err := binary.Read(reader, binary.BigEndian, &typ); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to read header type: %w", err)
+func parseDecryptedPayload(payload []byte, dst []byte, now time.Time) (n int, addr netip.AddrPort, err error) {
+	if len(payload) < 19 {
+		return 0, netip.AddrPort{}, fmt.Errorf("payload too short: %d", len(payload))
 	}
 
-	// Read timestamp
-	var timestampRaw uint64
-	if err := binary.Read(reader, binary.BigEndian, &timestampRaw); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to read timestamp: %w", err)
-	}
-	timestamp := time.Unix(int64(timestampRaw), 0)
-
-	// Skip client session ID (8 bytes)
-	if _, err := reader.Seek(8, io.SeekCurrent); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to skip session ID: %w", err)
+	headerType := payload[0]
+	if headerType != HeaderTypeServerStream {
+		return 0, netip.AddrPort{}, fmt.Errorf("received unexpected header type: %d", headerType)
 	}
 
-	// Read padding length
-	var paddingLength uint16
-	if err := binary.Read(reader, binary.BigEndian, &paddingLength); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to read padding length: %w", err)
-	}
-
-	// Skip padding
-	if _, err := reader.Seek(int64(paddingLength), io.SeekCurrent); err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("failed to skip padding: %w", err)
-	}
-
-	if typ != HeaderTypeServerStream {
-		return 0, netip.AddrPort{}, fmt.Errorf("received unexpected header type: %d", typ)
-	}
-
+	timestamp := time.Unix(int64(binary.BigEndian.Uint64(payload[1:9])), 0)
 	if err := validateTimestamp(timestamp, now); err != nil {
 		return 0, netip.AddrPort{}, err
 	}
 
-	// Parse address from decrypted data
-	netAddr, err := socks5.ReadAddr(reader)
+	paddingLength := int(binary.BigEndian.Uint16(payload[17:19]))
+	offset := 19 + paddingLength
+	if offset >= len(payload) {
+		return 0, netip.AddrPort{}, fmt.Errorf("payload too short for address")
+	}
+
+	addr, offset, err = parseUDPAddrPort(payload, offset)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
 
-	// Convert net.Addr to netip.AddrPort
-	if udpAddr, ok := netAddr.(*net.UDPAddr); ok {
-		ipAddr, _ := netip.AddrFromSlice(udpAddr.IP)
-		addr = netip.AddrPortFrom(ipAddr, uint16(udpAddr.Port))
+	return copy(dst, payload[offset:]), addr, nil
+}
+
+func parseUDPAddrPort(payload []byte, offset int) (netip.AddrPort, int, error) {
+	if offset >= len(payload) {
+		return netip.AddrPort{}, offset, fmt.Errorf("payload truncated at address type")
 	}
 
-	// Copy remaining data to output buffer
-	n, err = reader.Read(b)
-	return
+	addrType := payload[offset]
+	offset++
+
+	switch addrType {
+	case byte(socks5.AddressTypeIPv4):
+		if offset+6 > len(payload) {
+			return netip.AddrPort{}, offset, fmt.Errorf("payload truncated at IPv4 address")
+		}
+		ip, ok := netip.AddrFromSlice(payload[offset : offset+4])
+		if !ok {
+			return netip.AddrPort{}, offset, fmt.Errorf("invalid IPv4 address")
+		}
+		port := binary.BigEndian.Uint16(payload[offset+4 : offset+6])
+		return netip.AddrPortFrom(ip, port), offset + 6, nil
+	case byte(socks5.AddressTypeIPv6):
+		if offset+18 > len(payload) {
+			return netip.AddrPort{}, offset, fmt.Errorf("payload truncated at IPv6 address")
+		}
+		ip, ok := netip.AddrFromSlice(payload[offset : offset+16])
+		if !ok {
+			return netip.AddrPort{}, offset, fmt.Errorf("invalid IPv6 address")
+		}
+		port := binary.BigEndian.Uint16(payload[offset+16 : offset+18])
+		return netip.AddrPortFrom(ip, port), offset + 18, nil
+	case byte(socks5.AddressTypeDomain):
+		if offset >= len(payload) {
+			return netip.AddrPort{}, offset, fmt.Errorf("payload truncated at domain length")
+		}
+		domainLen := int(payload[offset])
+		offset++
+		if offset+domainLen+2 > len(payload) {
+			return netip.AddrPort{}, offset, fmt.Errorf("payload truncated at domain address")
+		}
+		// For domain addresses, we return an empty AddrPort.
+		// The caller should handle domain addresses separately if needed.
+		// This maintains API compatibility while allowing domain parsing.
+		_ = string(payload[offset : offset+domainLen]) // domain name (currently unused)
+		// port := binary.BigEndian.Uint16(payload[offset+domainLen : offset+domainLen+2])
+		// Note: Domain addresses are parsed but not returned via netip.AddrPort.
+		// For sniffing purposes, the raw payload should be inspected.
+		return netip.AddrPort{}, offset + domainLen + 2, nil
+	default:
+		return netip.AddrPort{}, offset, fmt.Errorf("invalid address: invalid type: %v", addrType)
+	}
 }
