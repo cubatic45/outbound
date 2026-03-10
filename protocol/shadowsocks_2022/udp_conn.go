@@ -2,16 +2,12 @@ package shadowsocks_2022
 
 import (
 	"bytes"
-	"crypto/aes"
 	"crypto/cipher"
-	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
 	"net/netip"
-	"os"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,42 +19,28 @@ import (
 	"github.com/daeuniverse/outbound/protocol/socks5"
 	disk_bloom "github.com/mzz2017/disk-bloom"
 	"github.com/samber/oops"
-	"lukechampine.com/blake3"
 )
 
-// Global option to control multi-PSK UDP optimization
-// Set env var SS2022_UDP_MULTI_PSK_OPTIMIZATION=1 to enable aggressive optimization
-// (send identity header only once, similar to TCP behavior)
-var udpMultiPSKAggressiveOptimization = func() bool {
-	if val := os.Getenv("SS2022_UDP_MULTI_PSK_OPTIMIZATION"); val != "" {
-		if enabled, err := strconv.ParseBool(val); err == nil {
-			return enabled
-		}
-	}
-	return false // Default: conservative mode (send identity header every packet)
-}()
-
+// UdpConn represents a Shadowsocks 2022 UDP connection.
+// Design follows sing-box: cipher is created once at session initialization.
 type UdpConn struct {
+	*SS2022Core
+
 	net.Conn
 
 	sessionID [8]byte
 	packetID  atomic.Uint64
 
-	cipherConf         *ciphers.CipherConf2022
+	// Session-level cipher (created once, reused for all packets)
+	// Same design as sing-box
+	cipher cipher.AEAD
+
 	blockCipherEncrypt cipher.Block
 	blockCipherDecrypt cipher.Block
 
-	pskList [][]byte
-	uPSK    []byte
-	bloom   *disk_bloom.FilterGroup
+	bloom *disk_bloom.FilterGroup
 
 	replayWindow sync.Map
-
-	cachedIdentityComponents [][]byte
-	identityHeaderCache      atomic.Value
-	identityHeaderMutex      sync.Mutex
-	hasMultiPSK              bool
-	identityHeaderSent       atomic.Bool
 
 	cleanupCounter atomic.Int64
 }
@@ -70,36 +52,37 @@ const (
 
 type udpSessionReplayState struct {
 	filter   *ciphers.SlidingWindowFilter
-	lastSeen atomic.Int64 // Unix nano timestamp
+	lastSeen atomic.Int64
 }
 
+// NewUdpConn creates a new UDP connection with SS2022 protocol.
+// Cipher is created once at initialization (like sing-box design).
 func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf2022, blockCipherEncrypt cipher.Block, blockCipherDecrypt cipher.Block, pskList [][]byte, uPSK []byte, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
-	u := UdpConn{
+	core, err := NewSS2022Core(conf, pskList, uPSK)
+	if err != nil {
+		return nil, err
+	}
+
+	u := &UdpConn{
+		SS2022Core:         core,
 		Conn:               conn,
-		cipherConf:         conf,
 		blockCipherEncrypt: blockCipherEncrypt,
 		blockCipherDecrypt: blockCipherDecrypt,
-		pskList:            pskList,
-		uPSK:               uPSK,
 		bloom:              bloom,
-		hasMultiPSK:        len(pskList) > 1,
 	}
+
+	// Generate session ID
 	fastrand.Read(u.sessionID[:])
 
-	// Pre-compute identity header components for multi-PSK scenario
-	// This cache stores BLAKE3 hashes of each PSK for fast identity header generation
-	if u.hasMultiPSK {
-		u.cachedIdentityComponents = make([][]byte, len(pskList)-1)
-		for i := 0; i < len(pskList)-1; i++ {
-			hash := blake3.Sum512(pskList[i+1])
-			// Store first aes.BlockSize (16) bytes of the hash
-			component := make([]byte, aes.BlockSize)
-			copy(component, hash[:aes.BlockSize])
-			u.cachedIdentityComponents[i] = component
-		}
+	// Create cipher once at session initialization (same as sing-box)
+	sessionID := make([]byte, 8)
+	binary.BigEndian.PutUint64(sessionID, binary.BigEndian.Uint64(u.sessionID[:]))
+	u.cipher, err = CreateCipher(uPSK, sessionID, conf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create session cipher: %w", err)
 	}
 
-	return &u, nil
+	return u, nil
 }
 
 func (c *UdpConn) nextPacketID() uint64 {
@@ -154,11 +137,10 @@ func (c *UdpConn) cleanupExpiredSessions(nowNano, expireNano int64) {
 	})
 }
 
-// evictOldestIfNeeded evicts the oldest session if we exceed max sessions
 func (c *UdpConn) evictOldestIfNeeded() {
 	var count int
 	var oldestKey [8]byte
-	var oldestNano int64 = ^int64(0) // max int64
+	var oldestNano int64 = ^int64(0)
 
 	c.replayWindow.Range(func(key, value interface{}) bool {
 		count++
@@ -174,86 +156,6 @@ func (c *UdpConn) evictOldestIfNeeded() {
 	if count > maxTrackedUdpSessions {
 		c.replayWindow.Delete(oldestKey)
 	}
-}
-
-func (c *UdpConn) estimateIdentityHeaderLen() int {
-	if !c.hasMultiPSK {
-		return 0
-	}
-	if udpMultiPSKAggressiveOptimization && c.identityHeaderSent.Load() {
-		return 0
-	}
-	if cached, ok := c.identityHeaderCache.Load().([]byte); ok {
-		return len(cached)
-	}
-	return len(c.cachedIdentityComponents) * aes.BlockSize
-}
-
-func (c *UdpConn) writeIdentityHeader(dst []byte, separateHeader []byte) (int, error) {
-	// Fast path: single PSK - no identity header needed
-	if !c.hasMultiPSK {
-		return 0, nil
-	}
-
-	// Aggressive optimization mode: send identity header only once
-	// This matches TCP behavior and significantly reduces per-packet overhead
-	// Use with caution: requires server-side compatibility
-	if udpMultiPSKAggressiveOptimization {
-		if c.identityHeaderSent.Load() {
-			// Identity header already sent, skip for subsequent packets
-			return 0, nil
-		}
-
-		// Send identity header for the first packet and cache it
-		c.identityHeaderMutex.Lock()
-		defer c.identityHeaderMutex.Unlock()
-
-		// Double-check after acquiring lock
-		if c.identityHeaderSent.Load() {
-			return 0, nil
-		}
-
-		// Generate and cache the identity header.
-		cachedHeader := make([]byte, len(c.cachedIdentityComponents)*aes.BlockSize)
-		offset := 0
-		for i := 0; i < len(c.cachedIdentityComponents); i++ {
-			header := cachedHeader[offset : offset+aes.BlockSize]
-			subtle.XORBytes(header, c.cachedIdentityComponents[i], separateHeader)
-			b, err := c.cipherConf.NewBlockCipher(c.pskList[i])
-			if err != nil {
-				return 0, err
-			}
-			b.Encrypt(header, header)
-			offset += aes.BlockSize
-		}
-
-		c.identityHeaderCache.Store(cachedHeader)
-		c.identityHeaderSent.Store(true)
-		if len(dst) < len(cachedHeader) {
-			return 0, io.ErrShortBuffer
-		}
-		copy(dst, cachedHeader)
-		return len(cachedHeader), nil
-	}
-
-	// Conservative mode: optimized multi-PSK with pre-computed hash components
-	// Still sends identity header every packet, but avoids BLAKE3 recomputation
-	headerLen := len(c.cachedIdentityComponents) * aes.BlockSize
-	if len(dst) < headerLen {
-		return 0, io.ErrShortBuffer
-	}
-	offset := 0
-	for i := 0; i < len(c.cachedIdentityComponents); i++ {
-		header := dst[offset : offset+aes.BlockSize]
-		subtle.XORBytes(header, c.cachedIdentityComponents[i], separateHeader)
-		b, err := c.cipherConf.NewBlockCipher(c.pskList[i])
-		if err != nil {
-			return 0, err
-		}
-		b.Encrypt(header, header)
-		offset += aes.BlockSize
-	}
-	return headerLen, nil
 }
 
 func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
@@ -274,14 +176,14 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 		return 0, oops.Wrapf(err, "fail to calculate address length")
 	}
 	messageLen := 1 + 8 + 2 + addrLen + len(b)
-	totalPacketLen := len(separateHeaderEncrypted) + c.estimateIdentityHeaderLen() + messageLen + c.cipherConf.TagLen
+	totalPacketLen := len(separateHeaderEncrypted) + c.IdentityHeaderLen() + messageLen + c.CipherConf().TagLen
 	packet := pool.Get(totalPacketLen)
 	defer pool.Put(packet)
 	offset := 0
 	copy(packet[offset:], separateHeaderEncrypted[:])
 	offset += len(separateHeaderEncrypted)
 
-	identityHeaderLen, err := c.writeIdentityHeader(packet[offset:], separateHeader[:])
+	identityHeaderLen, err := c.WriteIdentityHeader(packet[offset:], separateHeader[:])
 	if err != nil {
 		return 0, oops.Wrapf(err, "fail to write identity header")
 	}
@@ -291,28 +193,22 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	message := packet[messageOffset : messageOffset+messageLen]
 	message[0] = HeaderTypeClientStream
 	binary.BigEndian.PutUint64(message[1:9], uint64(time.Now().Unix()))
-	// No padding.
 	binary.BigEndian.PutUint16(message[9:11], 0)
 	addrWritten, err := writeAddrInfoTo(message[11:], addrInfo)
 	if err != nil {
-		return 0, oops.Wrapf(err, "fail to encode target address")
+		return 0, oops.Wrapf(err, "fail to encode request address")
 	}
 	copy(message[11+addrWritten:], b)
 
-	// Encrypt and send
-	// Optimized: Use cached cipher for session reuse
-	cipher, err := GetCachedCipher(c.uPSK, separateHeader[:8], c.cipherConf, true)
-	if err != nil {
-		return 0, err
-	}
-	packet = cipher.Seal(packet[:messageOffset], separateHeader[4:16], message, nil)
+	// Use session-level cipher (no cache lookup needed)
+	packet = c.cipher.Seal(packet[:messageOffset], separateHeader[4:16], message, nil)
 
 	_, err = c.Conn.Write(packet)
 	return len(b), err
 }
 
 func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
-	buf := pool.Get(len(b) + 16 + c.cipherConf.TagLen)
+	buf := pool.Get(len(b) + 16 + c.CipherConf().TagLen)
 	defer pool.Put(buf)
 	n, err = c.Conn.Read(buf)
 	if err != nil {
@@ -332,44 +228,34 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 	}
 
 	payload := buf[16:n]
-	// Optimized: Use cached cipher for session reuse
-	ciph, err := GetCachedCipher(c.uPSK, buf[:8], c.cipherConf, false)
-	if err != nil {
-		return 0, netip.AddrPort{}, err
-	}
-	payload, err = ciph.Open(payload[:0], buf[4:16], payload, nil)
+	// Use session-level cipher (no cache lookup needed)
+	payload, err = c.cipher.Open(payload[:0], buf[4:16], payload, nil)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
 
-	// Use bytes.Reader to simplify parsing
 	reader := bytes.NewReader(payload)
 
-	// Read header type
 	var typ uint8
 	if err := binary.Read(reader, binary.BigEndian, &typ); err != nil {
 		return 0, netip.AddrPort{}, fmt.Errorf("failed to read header type: %w", err)
 	}
 
-	// Read timestamp
 	var timestampRaw uint64
 	if err := binary.Read(reader, binary.BigEndian, &timestampRaw); err != nil {
 		return 0, netip.AddrPort{}, fmt.Errorf("failed to read timestamp: %w", err)
 	}
 	timestamp := time.Unix(int64(timestampRaw), 0)
 
-	// Skip client session ID (8 bytes)
 	if _, err := reader.Seek(8, io.SeekCurrent); err != nil {
 		return 0, netip.AddrPort{}, fmt.Errorf("failed to skip session ID: %w", err)
 	}
 
-	// Read padding length
 	var paddingLength uint16
 	if err := binary.Read(reader, binary.BigEndian, &paddingLength); err != nil {
 		return 0, netip.AddrPort{}, fmt.Errorf("failed to read padding length: %w", err)
 	}
 
-	// Skip padding
 	if _, err := reader.Seek(int64(paddingLength), io.SeekCurrent); err != nil {
 		return 0, netip.AddrPort{}, fmt.Errorf("failed to skip padding: %w", err)
 	}
@@ -382,19 +268,16 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 		return 0, netip.AddrPort{}, err
 	}
 
-	// Parse address from decrypted data
 	netAddr, err := socks5.ReadAddr(reader)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
 
-	// Convert net.Addr to netip.AddrPort
 	if udpAddr, ok := netAddr.(*net.UDPAddr); ok {
 		ipAddr, _ := netip.AddrFromSlice(udpAddr.IP)
 		addr = netip.AddrPortFrom(ipAddr, uint16(udpAddr.Port))
 	}
 
-	// Copy remaining data to output buffer
 	n, err = reader.Read(b)
 	return
 }

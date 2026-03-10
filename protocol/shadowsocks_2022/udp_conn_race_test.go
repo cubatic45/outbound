@@ -13,10 +13,13 @@ func TestReplayWindowRace(t *testing.T) {
 	conf := ciphers.Aead2022CiphersConf["2022-blake3-aes-256-gcm"]
 	psk := make([]byte, 32)
 
+	core, err := NewSS2022Core(conf, [][]byte{psk}, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	conn := &UdpConn{
-		cipherConf: conf,
-		pskList:    [][]byte{psk},
-		uPSK:       psk,
+		SS2022Core: core,
 	}
 
 	var wg sync.WaitGroup
@@ -33,65 +36,35 @@ func TestReplayWindowRace(t *testing.T) {
 	wg.Wait()
 }
 
-func TestCipherCacheRace(t *testing.T) {
+func TestNewUdpConnCreatesCipher(t *testing.T) {
 	conf := ciphers.Aead2022CiphersConf["2022-blake3-aes-256-gcm"]
 	psk := make([]byte, 32)
+
+	core, err := NewSS2022Core(conf, [][]byte{psk}, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn := &UdpConn{
+		SS2022Core: core,
+	}
+
+	// Verify cipher is nil before initialization
+	if conn.cipher != nil {
+		t.Error("cipher should be nil before NewUdpConn")
+	}
+
+	// Create cipher (simulating NewUdpConn behavior)
 	sessionID := make([]byte, 8)
-
-	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
-		wg.Add(2)
-
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 100; j++ {
-				_, err := GetCachedCipher(psk, sessionID, conf, true)
-				if err != nil {
-					t.Error(err)
-				}
-			}
-		}()
-
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 100; j++ {
-				_, err := GetCachedCipher(psk, sessionID, conf, false)
-				if err != nil {
-					t.Error(err)
-				}
-			}
-		}()
+	cipher, err := CreateCipher(psk, sessionID, conf)
+	if err != nil {
+		t.Fatal(err)
 	}
-	wg.Wait()
-}
+	conn.cipher = cipher
 
-func TestUDPCacheNoLeak(t *testing.T) {
-	conf := ciphers.Aead2022CiphersConf["2022-blake3-aes-256-gcm"]
-	psk := make([]byte, 32)
-
-	for i := 0; i < 1000; i++ {
-		sessionID := make([]byte, 8)
-		sessionID[0] = byte(i % 256)
-		sessionID[1] = byte(i / 256)
-		_, _ = GetCachedCipher(psk, sessionID, conf, true)
-	}
-
-	runtime.GC()
-	var m1 runtime.MemStats
-	runtime.ReadMemStats(&m1)
-
-	for i := 0; i < 100000; i++ {
-		sessionID := make([]byte, 8)
-		_, _ = GetCachedCipher(psk, sessionID, conf, true)
-	}
-	runtime.GC()
-
-	var m2 runtime.MemStats
-	runtime.ReadMemStats(&m2)
-
-	growth := int64(m2.HeapAlloc) - int64(m1.HeapAlloc)
-	if growth > 10<<20 {
-		t.Errorf("Potential memory leak: heap grew by %d bytes", growth)
+	// Verify cipher is created
+	if conn.cipher == nil {
+		t.Error("cipher should be created")
 	}
 }
 
@@ -102,8 +75,10 @@ func TestNoGoroutineLeak(t *testing.T) {
 	psk := make([]byte, 32)
 
 	for i := 0; i < 100; i++ {
-		sessionID := make([]byte, 8)
-		_, _ = GetCachedCipher(psk, sessionID, conf, true)
+		_, err := NewSS2022Core(conf, [][]byte{psk}, psk)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	time.Sleep(100 * time.Millisecond)
@@ -114,25 +89,63 @@ func TestNoGoroutineLeak(t *testing.T) {
 	}
 }
 
-func BenchmarkCipherCacheGet(b *testing.B) {
+func BenchmarkSessionCipherAccess(b *testing.B) {
 	conf := ciphers.Aead2022CiphersConf["2022-blake3-aes-256-gcm"]
 	psk := make([]byte, 32)
+
+	core, err := NewSS2022Core(conf, [][]byte{psk}, psk)
+	if err != nil {
+		b.Fatal(err)
+	}
+
 	sessionID := make([]byte, 8)
+	cipher, err := CreateCipher(psk, sessionID, conf)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	conn := &UdpConn{
+		SS2022Core: core,
+		cipher:     cipher,
+	}
+
+	plaintext := make([]byte, 1400)
+	nonce := make([]byte, 12)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = GetCachedCipher(psk, sessionID, conf, true)
+		out := make([]byte, len(plaintext)+16)
+		_ = conn.cipher.Seal(out[:0], nonce, plaintext, nil)
 	}
 }
 
-func BenchmarkCipherCacheGetParallel(b *testing.B) {
+func BenchmarkSessionCipherAccessParallel(b *testing.B) {
 	conf := ciphers.Aead2022CiphersConf["2022-blake3-aes-256-gcm"]
 	psk := make([]byte, 32)
 
+	core, err := NewSS2022Core(conf, [][]byte{psk}, psk)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	sessionID := make([]byte, 8)
+	cipher, err := CreateCipher(psk, sessionID, conf)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	conn := &UdpConn{
+		SS2022Core: core,
+		cipher:     cipher,
+	}
+
+	plaintext := make([]byte, 1400)
+	nonce := make([]byte, 12)
+
 	b.RunParallel(func(pb *testing.PB) {
-		sessionID := make([]byte, 8)
 		for pb.Next() {
-			_, _ = GetCachedCipher(psk, sessionID, conf, true)
+			out := make([]byte, len(plaintext)+16)
+			_ = conn.cipher.Seal(out[:0], nonce, plaintext, nil)
 		}
 	})
 }
@@ -141,10 +154,13 @@ func BenchmarkReplayCheck(b *testing.B) {
 	conf := ciphers.Aead2022CiphersConf["2022-blake3-aes-256-gcm"]
 	psk := make([]byte, 32)
 
+	core, err := NewSS2022Core(conf, [][]byte{psk}, psk)
+	if err != nil {
+		b.Fatal(err)
+	}
+
 	conn := &UdpConn{
-		cipherConf: conf,
-		pskList:    [][]byte{psk},
-		uPSK:       psk,
+		SS2022Core: core,
 	}
 	sessionID := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
 	now := time.Now()

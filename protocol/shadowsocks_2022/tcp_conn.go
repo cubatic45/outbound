@@ -32,14 +32,14 @@ const (
 	maxReusableWriteFrameSize = 128 << 10
 )
 
-// TCPConn represents a Shadowsocks TCP connection
+// TCPConn represents a Shadowsocks TCP connection.
+// It embeds SS2022Core for shared logic (identity header, cipher cache).
 type TCPConn struct {
+	*SS2022Core // Embedded core for shared logic
+
 	net.Conn
-	addr       *socks5.AddressInfo
-	cipherConf *ciphers.CipherConf2022
-	pskList    [][]byte
-	uPSK       []byte
-	sg         shadowsocks.SaltGenerator
+	addr *socks5.AddressInfo
+	sg   shadowsocks.SaltGenerator
 
 	cipherRead  cipher.AEAD
 	cipherWrite cipher.AEAD
@@ -65,12 +65,13 @@ type Key struct {
 }
 
 func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf2022, pskList [][]byte, uPSK []byte, sg shadowsocks.SaltGenerator, addr *socks5.AddressInfo, bloom *disk_bloom.FilterGroup) net.Conn {
+	// Create shared core (ignore error for backward compatibility with existing API)
+	core, _ := NewSS2022Core(conf, pskList, uPSK)
+
 	tcpConn := &TCPConn{
+		SS2022Core: core,
 		Conn:       conn,
 		addr:       addr,
-		cipherConf: conf,
-		pskList:    pskList,
-		uPSK:       uPSK,
 		sg:         sg,
 		nonceRead:  make([]byte, conf.NonceLen),
 		nonceWrite: make([]byte, conf.NonceLen),
@@ -177,17 +178,17 @@ func (c *TCPConn) borrowWriteFrame(size int) []byte {
 }
 
 func (c *TCPConn) writeIdentityHeaderTo(dst []byte, offset int, salt []byte) (int, error) {
-	for i := 0; i < len(c.pskList)-1; i++ {
+	for i := 0; i < len(c.PSKList())-1; i++ {
 		if offset+aes.BlockSize > len(dst) {
 			return 0, io.ErrShortBuffer
 		}
-		identitySubkey := GenerateSubKey(c.pskList[i], salt, Shadowsocks2022IdentityHeaderInfo)
-		b, err := c.cipherConf.NewBlockCipher(identitySubkey)
+		identitySubkey := GenerateSubKey(c.PSKList()[i], salt, Shadowsocks2022IdentityHeaderInfo)
+		b, err := c.CipherConf().NewBlockCipher(identitySubkey)
 		if err != nil {
 			PutSubKey(identitySubkey)
 			return 0, err
 		}
-		plaintext := blake3.Sum512(c.pskList[i+1])
+		plaintext := blake3.Sum512(c.PSKList()[i+1])
 		b.Encrypt(dst[offset:offset+aes.BlockSize], plaintext[:aes.BlockSize])
 		PutSubKey(identitySubkey)
 		offset += aes.BlockSize
@@ -202,10 +203,10 @@ func (c *TCPConn) sealPayload(dst []byte, payload []byte) int {
 		chunkLength := common.Min(TCPChunkMaxLen, len(payload)-i)
 		binary.BigEndian.PutUint16(chunkLengthBuf[:], uint16(chunkLength))
 		_ = c.cipherWrite.Seal(dst[offset:offset], c.nonceWrite, chunkLengthBuf[:], nil)
-		offset += 2 + c.cipherConf.TagLen
+		offset += 2 + c.CipherConf().TagLen
 		common.BytesIncLittleEndian(c.nonceWrite)
 		_ = c.cipherWrite.Seal(dst[offset:offset], c.nonceWrite, payload[i:i+chunkLength], nil)
-		offset += chunkLength + c.cipherConf.TagLen
+		offset += chunkLength + c.CipherConf().TagLen
 		common.BytesIncLittleEndian(c.nonceWrite)
 	}
 	return offset
@@ -229,18 +230,18 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 
 	if !c.onceRead {
 		var saltBuf [32]byte
-		salt := saltBuf[:c.cipherConf.SaltLen]
+		salt := saltBuf[:c.CipherConf().SaltLen]
 		n, err = io.ReadFull(c.Conn, salt)
 		if err != nil {
 			return 0, err
 		}
-		c.cipherRead, err = CreateCipher(c.uPSK, salt, c.cipherConf)
+		c.cipherRead, err = CreateCipher(c.UPSK(), salt, c.CipherConf())
 		if err != nil {
 			return 0, oops.Wrapf(err, "fail to initiate cipher")
 		}
 
 		var headerBuf [11 + 32 + 16]byte
-		header := headerBuf[:11+c.cipherConf.SaltLen+c.cipherConf.TagLen]
+		header := headerBuf[:11+c.CipherConf().SaltLen+c.CipherConf().TagLen]
 		if _, err := io.ReadFull(c.Conn, header); err != nil {
 			return 0, err
 		}
@@ -271,14 +272,14 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 		}
 
 		// Skip request salt
-		offset += c.cipherConf.SaltLen
+		offset += c.CipherConf().SaltLen
 
 		payloadLength = binary.BigEndian.Uint16(header[offset : offset+2])
 
 		c.onceRead = true
 	} else {
 		var payloadLengthBuf [2 + 16]byte
-		payloadLengthRaw := payloadLengthBuf[:2+c.cipherConf.TagLen]
+		payloadLengthRaw := payloadLengthBuf[:2+c.CipherConf().TagLen]
 		if _, err := io.ReadFull(c.Conn, payloadLengthRaw); err != nil {
 			return 0, err
 		}
@@ -295,7 +296,7 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 		return 0, oops.Wrapf(err, "cipher is not initialized")
 	}
 
-	payload := c.ensureReadCipherBuf(int(payloadLength) + c.cipherConf.TagLen)
+	payload := c.ensureReadCipherBuf(int(payloadLength) + c.CipherConf().TagLen)
 	if _, err = io.ReadFull(c.Conn, payload); err != nil {
 		return 0, err
 	}
@@ -326,7 +327,7 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 		defer pool.Put(salt)
 
 		// Setup encryption
-		c.cipherWrite, err = CreateCipher(c.uPSK, salt, c.cipherConf)
+		c.cipherWrite, err = CreateCipher(c.UPSK(), salt, c.CipherConf())
 		if err != nil {
 			return 0, oops.Wrapf(err, "fail to initiate cipher")
 		}
@@ -344,10 +345,10 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 		firstVarHeaderLen := addrLen + 2 + initialPayloadLen
 		remainingPayload := b[initialPayloadLen:]
 		totalSize := len(salt) +
-			(len(c.pskList)-1)*aes.BlockSize +
-			(11 + c.cipherConf.TagLen) +
-			(firstVarHeaderLen + c.cipherConf.TagLen) +
-			encryptedPayloadLen(len(remainingPayload), c.cipherConf.TagLen)
+			(len(c.PSKList())-1)*aes.BlockSize +
+			(11 + c.CipherConf().TagLen) +
+			(firstVarHeaderLen + c.CipherConf().TagLen) +
+			encryptedPayloadLen(len(remainingPayload), c.CipherConf().TagLen)
 		frame := c.borrowWriteFrame(totalSize)
 		offset := 0
 		copy(frame[offset:], salt)
@@ -387,7 +388,7 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 	if c.cipherWrite == nil {
 		return 0, fmt.Errorf("cipher is not initialized")
 	}
-	frameSize := encryptedPayloadLen(len(b), c.cipherConf.TagLen)
+	frameSize := encryptedPayloadLen(len(b), c.CipherConf().TagLen)
 	frame := c.borrowWriteFrame(frameSize)
 	offset := c.sealPayload(frame, b)
 	_, err = c.Conn.Write(frame[:offset])
