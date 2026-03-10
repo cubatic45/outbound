@@ -33,7 +33,9 @@ type UdpConn struct {
 
 	// Session-level cipher (created once, reused for all packets)
 	// Same design as sing-box
-	cipher cipher.AEAD
+	cipher     cipher.AEAD
+	cipherOnce sync.Once
+	cipherErr  error
 
 	blockCipherEncrypt cipher.Block
 	blockCipherDecrypt cipher.Block
@@ -73,16 +75,17 @@ func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf2022, blockCipherEncrypt 
 
 	// Generate session ID
 	fastrand.Read(u.sessionID[:])
-
-	// Create cipher once at session initialization (same as sing-box)
-	sessionID := make([]byte, 8)
-	binary.BigEndian.PutUint64(sessionID, binary.BigEndian.Uint64(u.sessionID[:]))
-	u.cipher, err = CreateCipher(uPSK, sessionID, conf)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create session cipher: %w", err)
-	}
-
 	return u, nil
+}
+
+func (c *UdpConn) ensureCipher() error {
+	c.cipherOnce.Do(func() {
+		c.cipher, c.cipherErr = CreateCipher(c.UPSK(), c.sessionID[:], c.CipherConf())
+		if c.cipherErr != nil {
+			c.cipherErr = fmt.Errorf("failed to create session cipher: %w", c.cipherErr)
+		}
+	})
+	return c.cipherErr
 }
 
 func (c *UdpConn) nextPacketID() uint64 {
@@ -159,6 +162,10 @@ func (c *UdpConn) evictOldestIfNeeded() {
 }
 
 func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
+	if err := c.ensureCipher(); err != nil {
+		return 0, err
+	}
+
 	packetID := c.nextPacketID()
 	var separateHeader [16]byte
 	copy(separateHeader[:8], c.sessionID[:])
@@ -208,6 +215,10 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 }
 
 func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
+	if err := c.ensureCipher(); err != nil {
+		return 0, netip.AddrPort{}, err
+	}
+
 	buf := pool.Get(len(b) + 16 + c.CipherConf().TagLen)
 	defer pool.Put(buf)
 	n, err = c.Conn.Read(buf)
