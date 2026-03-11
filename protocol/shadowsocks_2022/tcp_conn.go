@@ -64,17 +64,14 @@ type Key struct {
 	MasterKey  []byte
 }
 
-func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf2022, pskList [][]byte, uPSK []byte, sg shadowsocks.SaltGenerator, addr *socks5.AddressInfo, bloom *disk_bloom.FilterGroup) net.Conn {
-	// Create shared core (ignore error for backward compatibility with existing API)
-	core, _ := NewSS2022Core(conf, pskList, uPSK)
-
+func NewTCPConn(conn net.Conn, core *SS2022Core, sg shadowsocks.SaltGenerator, addr *socks5.AddressInfo, bloom *disk_bloom.FilterGroup) net.Conn {
 	tcpConn := &TCPConn{
 		SS2022Core: core,
 		Conn:       conn,
 		addr:       addr,
 		sg:         sg,
-		nonceRead:  make([]byte, conf.NonceLen),
-		nonceWrite: make([]byte, conf.NonceLen),
+		nonceRead:  make([]byte, core.CipherConf().NonceLen),
+		nonceWrite: make([]byte, core.CipherConf().NonceLen),
 		bloom:      bloom,
 	}
 	return tcpConn

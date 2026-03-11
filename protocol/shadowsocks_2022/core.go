@@ -18,6 +18,10 @@ type SS2022Core struct {
 	pskList    [][]byte
 	uPSK       []byte
 
+	// Shared block ciphers derived from the configured PSKs.
+	blockCipherEncrypt cipher.Block
+	blockCipherDecrypt cipher.Block
+
 	// Pre-computed identity header hash components for multi-PSK scenario
 	pskHash [][]byte
 
@@ -30,11 +34,26 @@ type SS2022Core struct {
 
 // NewSS2022Core creates a new SS2022Core with pre-computed identity components.
 func NewSS2022Core(conf *ciphers.CipherConf2022, pskList [][]byte, uPSK []byte) (*SS2022Core, error) {
+	if len(pskList) == 0 {
+		return nil, fmt.Errorf("empty PSK list")
+	}
+
+	blockCipherEncrypt, err := conf.NewBlockCipher(pskList[0])
+	if err != nil {
+		return nil, fmt.Errorf("failed to create encrypt block cipher: %w", err)
+	}
+	blockCipherDecrypt, err := conf.NewBlockCipher(uPSK)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create decrypt block cipher: %w", err)
+	}
+
 	core := &SS2022Core{
-		cipherConf:  conf,
-		pskList:     pskList,
-		uPSK:        uPSK,
-		hasMultiPSK: len(pskList) > 1,
+		cipherConf:         conf,
+		pskList:            pskList,
+		uPSK:               uPSK,
+		blockCipherEncrypt: blockCipherEncrypt,
+		blockCipherDecrypt: blockCipherDecrypt,
+		hasMultiPSK:        len(pskList) > 1,
 	}
 
 	// Pre-compute identity header components for multi-PSK scenario (like sing-box)
@@ -108,6 +127,18 @@ func (c *SS2022Core) CipherConf() *ciphers.CipherConf2022 {
 // UPSK returns the user PSK.
 func (c *SS2022Core) UPSK() []byte {
 	return c.uPSK
+}
+
+// BlockCipherEncrypt returns the shared block cipher used for encrypting the
+// separate header on outbound packets.
+func (c *SS2022Core) BlockCipherEncrypt() cipher.Block {
+	return c.blockCipherEncrypt
+}
+
+// BlockCipherDecrypt returns the shared block cipher used for decrypting the
+// separate header on inbound packets.
+func (c *SS2022Core) BlockCipherDecrypt() cipher.Block {
+	return c.blockCipherDecrypt
 }
 
 // PSKList returns the list of PSKs.

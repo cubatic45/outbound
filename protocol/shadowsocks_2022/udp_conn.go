@@ -37,12 +37,10 @@ type UdpConn struct {
 	cipherOnce sync.Once
 	cipherErr  error
 
-	blockCipherEncrypt cipher.Block
-	blockCipherDecrypt cipher.Block
-
 	bloom *disk_bloom.FilterGroup
 
 	replayWindow sync.Map
+	replayCount  atomic.Int64
 
 	cleanupCounter atomic.Int64
 }
@@ -57,20 +55,12 @@ type udpSessionReplayState struct {
 	lastSeen atomic.Int64
 }
 
-// NewUdpConn creates a new UDP connection with SS2022 protocol.
-// Cipher is created once at initialization (like sing-box design).
-func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf2022, blockCipherEncrypt cipher.Block, blockCipherDecrypt cipher.Block, pskList [][]byte, uPSK []byte, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
-	core, err := NewSS2022Core(conf, pskList, uPSK)
-	if err != nil {
-		return nil, err
-	}
-
+// NewUdpConn creates a new UDP connection bound to a shared SS2022 profile.
+func NewUdpConn(conn net.Conn, core *SS2022Core, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
 	u := &UdpConn{
-		SS2022Core:         core,
-		Conn:               conn,
-		blockCipherEncrypt: blockCipherEncrypt,
-		blockCipherDecrypt: blockCipherDecrypt,
-		bloom:              bloom,
+		SS2022Core: core,
+		Conn:       conn,
+		bloom:      bloom,
 	}
 
 	// Generate session ID
@@ -100,7 +90,9 @@ func (c *UdpConn) checkAndUpdateReplay(sessionID [8]byte, packetID uint64, now t
 		state := v.(*udpSessionReplayState)
 		lastSeen := state.lastSeen.Load()
 		if nowNano-lastSeen > expireNano {
-			c.replayWindow.CompareAndDelete(sessionID, v)
+			if c.replayWindow.CompareAndDelete(sessionID, v) {
+				c.replayCount.Add(-1)
+			}
 		} else {
 			state.lastSeen.Store(nowNano)
 			return state.filter.CheckAndUpdate(packetID)
@@ -122,6 +114,7 @@ func (c *UdpConn) checkAndUpdateReplay(sessionID [8]byte, packetID uint64, now t
 	if loaded {
 		state.lastSeen.Store(nowNano)
 	} else {
+		c.replayCount.Add(1)
 		c.evictOldestIfNeeded()
 	}
 
@@ -134,30 +127,44 @@ func (c *UdpConn) cleanupExpiredSessions(nowNano, expireNano int64) {
 	c.replayWindow.Range(func(key, value interface{}) bool {
 		state := value.(*udpSessionReplayState)
 		if nowNano-state.lastSeen.Load() > expireNano {
-			c.replayWindow.Delete(key)
+			if c.replayWindow.CompareAndDelete(key, value) {
+				c.replayCount.Add(-1)
+			}
 		}
 		return true
 	})
 }
 
 func (c *UdpConn) evictOldestIfNeeded() {
-	var count int
-	var oldestKey [8]byte
-	var oldestNano int64 = ^int64(0)
+	for c.replayCount.Load() > maxTrackedUdpSessions {
+		var (
+			found      bool
+			oldestKey  [8]byte
+			oldestVal  any
+			oldestNano int64 = ^int64(0)
+		)
 
-	c.replayWindow.Range(func(key, value interface{}) bool {
-		count++
-		state := value.(*udpSessionReplayState)
-		seen := state.lastSeen.Load()
-		if seen < oldestNano {
-			oldestKey = key.([8]byte)
-			oldestNano = seen
+		c.replayWindow.Range(func(key, value interface{}) bool {
+			state := value.(*udpSessionReplayState)
+			seen := state.lastSeen.Load()
+			if !found || seen < oldestNano {
+				found = true
+				oldestKey = key.([8]byte)
+				oldestVal = value
+				oldestNano = seen
+			}
+			return true
+		})
+
+		if !found {
+			c.replayCount.Store(0)
+			return
 		}
-		return true
-	})
-
-	if count > maxTrackedUdpSessions {
-		c.replayWindow.Delete(oldestKey)
+		if c.replayWindow.CompareAndDelete(oldestKey, oldestVal) {
+			c.replayCount.Add(-1)
+			continue
+		}
+		// Retry if the oldest entry changed concurrently.
 	}
 }
 
@@ -172,7 +179,7 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	binary.BigEndian.PutUint64(separateHeader[8:], packetID)
 
 	var separateHeaderEncrypted [16]byte
-	c.blockCipherEncrypt.Encrypt(separateHeaderEncrypted[:], separateHeader[:])
+	c.BlockCipherEncrypt().Encrypt(separateHeaderEncrypted[:], separateHeader[:])
 
 	addrInfo, err := socks5.AddressFromString(addr)
 	if err != nil {
@@ -229,7 +236,7 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 		return 0, netip.AddrPort{}, fmt.Errorf("short length to decrypt")
 	}
 
-	c.blockCipherDecrypt.Decrypt(buf[:16], buf[:16])
+	c.BlockCipherDecrypt().Decrypt(buf[:16], buf[:16])
 	var sessionID [8]byte
 	copy(sessionID[:], buf[:8])
 	packetID := binary.BigEndian.Uint64(buf[8:16])
