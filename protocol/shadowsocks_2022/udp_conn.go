@@ -31,11 +31,18 @@ type UdpConn struct {
 	sessionID [8]byte
 	packetID  atomic.Uint64
 
-	// Session-level cipher (created once, reused for all packets)
-	// Same design as sing-box
+	// cipher is derived from the local session ID and reused for outbound
+	// packets. Inbound packets must decrypt against the remote session ID
+	// carried in each packet, so they use decryptCiphers instead.
 	cipher     cipher.AEAD
 	cipherOnce sync.Once
 	cipherErr  error
+
+	// decryptCiphers caches inbound AEAD instances by remote session ID.
+	// Keeping this per-UdpConn avoids the old process-wide cache while
+	// preserving the protocol requirement that receive-side decryption uses
+	// the sender's session ID, not the local one.
+	decryptCiphers sync.Map // map[[8]byte]cipher.AEAD
 
 	bloom *disk_bloom.FilterGroup
 
@@ -76,6 +83,19 @@ func (c *UdpConn) ensureCipher() error {
 		}
 	})
 	return c.cipherErr
+}
+
+func (c *UdpConn) decryptCipherFor(sessionID [8]byte) (cipher.AEAD, error) {
+	if cached, ok := c.decryptCiphers.Load(sessionID); ok {
+		return cached.(cipher.AEAD), nil
+	}
+
+	sessionCipher, err := CreateCipher(c.UPSK(), sessionID[:], c.CipherConf())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create decrypt cipher for remote session: %w", err)
+	}
+	actual, _ := c.decryptCiphers.LoadOrStore(sessionID, sessionCipher)
+	return actual.(cipher.AEAD), nil
 }
 
 func (c *UdpConn) nextPacketID() uint64 {
@@ -222,10 +242,6 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 }
 
 func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
-	if err := c.ensureCipher(); err != nil {
-		return 0, netip.AddrPort{}, err
-	}
-
 	buf := pool.Get(len(b) + 16 + c.CipherConf().TagLen)
 	defer pool.Put(buf)
 	n, err = c.Conn.Read(buf)
@@ -246,8 +262,11 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {
 	}
 
 	payload := buf[16:n]
-	// Use session-level cipher (no cache lookup needed)
-	payload, err = c.cipher.Open(payload[:0], buf[4:16], payload, nil)
+	sessionCipher, err := c.decryptCipherFor(sessionID)
+	if err != nil {
+		return 0, netip.AddrPort{}, err
+	}
+	payload, err = sessionCipher.Open(payload[:0], buf[4:16], payload, nil)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
