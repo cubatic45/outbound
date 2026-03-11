@@ -248,6 +248,17 @@ func (d *StickyIpDialer) IncrementCheckCycle() {
 	d.cache.InvalidateCycle(d.checkCycle - 1)
 }
 
+// InvalidateProtocolCache invalidates the cached IP for a specific protocol.
+// This is called when a connection fails (e.g., connection refused) to allow
+// immediate retry with a different IP.
+func (d *StickyIpDialer) InvalidateProtocolCache(proxyAddr, protocol string) {
+	d.cache.InvalidateProtocol(proxyAddr, protocol)
+	logger.WithFields(logrus.Fields{
+		"proxy_addr": proxyAddr,
+		"protocol":   protocol,
+	}).Info("[StickyIP] Protocol cache invalidated due to connection failure")
+}
+
 // GetCachedProxyAddr returns the cached IP for the proxy address and network type.
 // network should be "tcp" or "udp".
 func (d *StickyIpDialer) GetCachedProxyAddr(network string) string {
