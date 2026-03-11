@@ -337,38 +337,36 @@ func (d *StickyIpDialer) getBaseNetwork(network string) string {
 }
 
 // verifyUDPConnectivity checks if a UDP connection is actually working.
-// It sends a small packet and waits briefly for any response.
-// Returns true if the connection appears to be working.
+// For UDP, we do a basic sanity check by trying to read with a short deadline.
+// Note: UDP connectivity can only be truly verified by sending/receiving actual data,
+// so this is a best-effort check. The real validation happens during protocol handshake.
 func (d *StickyIpDialer) verifyUDPConnectivity(ctx context.Context, conn netproxy.PacketConn) bool {
-	// Set a short read deadline
-	conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	// Set a very short read deadline
+	conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 	defer conn.SetReadDeadline(time.Time{})
 
-	// Try to read with a small buffer
+	// Try to read - this will tell us if the socket is properly bound
 	buf := make([]byte, 1)
 	_, _, err := conn.ReadFrom(buf)
+
 	if err != nil {
-		// Expected - we haven't sent anything yet, but we want to check
-		// if the socket is actually bound and working
-		// A timeout or "would block" error means the socket is working
+		// A timeout is expected and means the socket is working (just no data yet)
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			return true
 		}
-		if err.Error() == "EOF" {
-			return true
-		}
-		// Check for connection refused explicitly
+		// Check for immediate connection refused
 		if opErr, ok := err.(*net.OpError); ok {
 			if opErr.Err.Error() == "connection refused" {
-				logger.WithField("error", err).Debug("[StickyIP] UDP connection refused")
+				logger.WithField("error", err).Debug("[StickyIP] UDP connection refused detected")
 				return false
 			}
 		}
-		// Other errors might mean the connection is not working
-		logger.WithField("error", err).Debug("[StickyIP] UDP verification read error")
+		// Other errors at this stage are inconclusive for UDP
+		// The socket might be fine, just no data available
+		logger.WithField("error", err).Trace("[StickyIP] UDP verification read error (inconclusive)")
 	}
-	// If we got here without a definitive failure, consider it working
-	// (no response could mean the server is up but not replying to our empty packet)
+
+	// If we got here without a definitive failure, consider the socket potentially working
 	return true
 }
 
