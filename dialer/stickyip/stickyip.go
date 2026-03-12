@@ -79,18 +79,22 @@ func (c *ProxyIpCache) Set(originalAddr, actualAddr string, network string, cycl
 	isUDP := network == "udp"
 	if isUDP {
 		entry.udpAddr = actualAddr
-		logger.WithFields(logrus.Fields{
-			"original_addr": originalAddr,
-			"udp_addr":      actualAddr,
-			"cycle":         cycle,
-		}).Info("[StickyIP] Cached proxy IP for UDP")
+		if logger.IsLevelEnabled(logrus.DebugLevel) {
+			logger.WithFields(logrus.Fields{
+				"original_addr": originalAddr,
+				"udp_addr":      actualAddr,
+				"cycle":         cycle,
+			}).Debug("[StickyIP] Cached proxy IP for UDP")
+		}
 	} else {
 		entry.tcpAddr = actualAddr
-		logger.WithFields(logrus.Fields{
-			"original_addr": originalAddr,
-			"tcp_addr":      actualAddr,
-			"cycle":         cycle,
-		}).Info("[StickyIP] Cached proxy IP for TCP")
+		if logger.IsLevelEnabled(logrus.DebugLevel) {
+			logger.WithFields(logrus.Fields{
+				"original_addr": originalAddr,
+				"tcp_addr":      actualAddr,
+				"cycle":         cycle,
+			}).Debug("[StickyIP] Cached proxy IP for TCP")
+		}
 	}
 }
 
@@ -118,9 +122,9 @@ func (c *ProxyIpCache) GetWithCycle(proxyAddr string, network string, currentCyc
 	// Only use cached IP if it's from the current cycle
 	if entry.checkCycle != currentCycle {
 		logger.WithFields(logrus.Fields{
-			"proxy_addr":     proxyAddr,
-			"entry_cycle":    entry.checkCycle,
-			"current_cycle":  currentCycle,
+			"proxy_addr":    proxyAddr,
+			"entry_cycle":   entry.checkCycle,
+			"current_cycle": currentCycle,
 		}).Debug("[StickyIP] Cycle mismatch - cache not from current cycle")
 		return proxyAddr
 	}
@@ -218,6 +222,7 @@ type StickyIpDialer struct {
 	cache      *ProxyIpCache
 	checkCycle uint64
 	proxyAddr  string // Original proxy address (domain:port or IP:port)
+	proxyHost  string
 }
 
 // NewStickyIpDialer creates a new sticky IP dialer wrapper.
@@ -225,13 +230,16 @@ func NewStickyIpDialer(dialer netproxy.Dialer, proxyAddr string, cache *ProxyIpC
 	if cache == nil {
 		cache = NewProxyIpCache()
 	}
-	// Log creation - this always shows regardless of log level
-	logger.WithField("proxy_addr", proxyAddr).Info("[StickyIP] NewStickyIpDialer created")
+	proxyHost, _, _ := net.SplitHostPort(proxyAddr)
+	if logger.IsLevelEnabled(logrus.DebugLevel) {
+		logger.WithField("proxy_addr", proxyAddr).Debug("[StickyIP] NewStickyIpDialer created")
+	}
 	return &StickyIpDialer{
 		dialer:     dialer,
 		cache:      cache,
 		checkCycle: 0,
 		proxyAddr:  proxyAddr,
+		proxyHost:  proxyHost,
 	}
 }
 
@@ -240,8 +248,8 @@ func (d *StickyIpDialer) IncrementCheckCycle() {
 	oldCycle := d.checkCycle
 	d.checkCycle++
 	logger.WithFields(logrus.Fields{
-		"old_cycle": oldCycle,
-		"new_cycle": d.checkCycle,
+		"old_cycle":  oldCycle,
+		"new_cycle":  d.checkCycle,
 		"proxy_addr": d.proxyAddr,
 	}).Debug("[StickyIP] Check cycle incremented")
 	// Invalidate old cycle entries to force refresh
@@ -253,10 +261,12 @@ func (d *StickyIpDialer) IncrementCheckCycle() {
 // immediate retry with a different IP.
 func (d *StickyIpDialer) InvalidateProtocolCache(proxyAddr, protocol string) {
 	d.cache.InvalidateProtocol(proxyAddr, protocol)
-	logger.WithFields(logrus.Fields{
-		"proxy_addr": proxyAddr,
-		"protocol":   protocol,
-	}).Info("[StickyIP] Protocol cache invalidated due to connection failure")
+	if logger.IsLevelEnabled(logrus.DebugLevel) {
+		logger.WithFields(logrus.Fields{
+			"proxy_addr": proxyAddr,
+			"protocol":   protocol,
+		}).Debug("[StickyIP] Protocol cache invalidated due to connection failure")
+	}
 }
 
 // GetCachedProxyAddr returns the cached IP for the proxy address and network type.
@@ -324,7 +334,7 @@ func (d *StickyIpDialer) DialContext(ctx context.Context, network, addr string) 
 			"network":     network,
 			"cached_addr": cachedAddr,
 		}).Debug("[StickyIP] No valid cached IP - resolving proxy domain")
-		return d.dialWithIpResolution(ctx, network, addr)
+		return d.dialWithIpResolution(ctx, network, addr, baseNetwork)
 	}
 
 	// Not the proxy address, just pass through
@@ -357,8 +367,8 @@ func (d *StickyIpDialer) verifyUDPConnectivity(ctx context.Context, conn netprox
 	defer conn.SetReadDeadline(time.Time{})
 
 	// Try to read - this will tell us if the socket is properly bound
-	buf := make([]byte, 1)
-	_, _, err := conn.ReadFrom(buf)
+	var buf [1]byte
+	_, _, err := conn.ReadFrom(buf[:])
 
 	if err != nil {
 		// A timeout is expected and means the socket is working (just no data yet)
@@ -388,17 +398,16 @@ func (d *StickyIpDialer) isProxyAddress(addr string) bool {
 		return true
 	}
 	// Check if host part matches
-	proxyHost, _, err1 := net.SplitHostPort(d.proxyAddr)
-	addrHost, _, err2 := net.SplitHostPort(addr)
-	if err1 == nil && err2 == nil {
-		return proxyHost == addrHost
+	addrHost, _, err := net.SplitHostPort(addr)
+	if err == nil && d.proxyHost != "" {
+		return d.proxyHost == addrHost
 	}
 	return false
 }
 
 // dialWithIpResolution resolves the address to IPs and tries each one.
 // The first successful IP is cached for subsequent connections.
-func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr string) (netproxy.Conn, error) {
+func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr, baseNetwork string) (netproxy.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		// Not in host:port format, try directly
@@ -424,7 +433,6 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 	logResolvedIPs(d.proxyAddr, ips, port, network)
 
 	// Extract base network type for protocol-specific caching
-	baseNetwork := d.getBaseNetwork(network)
 	isUDP := baseNetwork == "udp"
 
 	// Try each IP until one works
@@ -475,12 +483,12 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 var logger = logrus.StandardLogger()
 
 func logCacheHit(proxyAddr, cachedAddr, network string) {
-	if logger.IsLevelEnabled(logrus.InfoLevel) {
+	if logger.IsLevelEnabled(logrus.DebugLevel) {
 		logger.WithFields(logrus.Fields{
 			"proxy_addr": proxyAddr,
 			"cached_ip":  cachedAddr,
 			"network":    network,
-		}).Info("[StickyIP] ✓ Cache hit - using cached proxy IP (avoiding DNS)")
+		}).Debug("[StickyIP] Cache hit - using cached proxy IP")
 	}
 }
 
@@ -516,7 +524,7 @@ func logDirectDial(proxyAddr, addr, network string) {
 }
 
 func logResolvedIPs(proxyAddr string, ips []net.IPAddr, port, network string) {
-	if logger.IsLevelEnabled(logrus.InfoLevel) {
+	if logger.IsLevelEnabled(logrus.DebugLevel) {
 		ipList := make([]string, 0, len(ips))
 		for _, ip := range ips {
 			if ip.IP != nil {
@@ -529,7 +537,7 @@ func logResolvedIPs(proxyAddr string, ips []net.IPAddr, port, network string) {
 			"port":       port,
 			"network":    network,
 			"count":      len(ipList),
-		}).Info("[StickyIP] Resolved proxy domain to IPs")
+		}).Debug("[StickyIP] Resolved proxy domain to IPs")
 	}
 }
 
@@ -544,13 +552,13 @@ func logTryingIP(proxyAddr, targetAddr, network string) {
 }
 
 func logIPSuccess(proxyAddr, targetAddr, network string, cycle uint64) {
-	if logger.IsLevelEnabled(logrus.InfoLevel) {
+	if logger.IsLevelEnabled(logrus.DebugLevel) {
 		logger.WithFields(logrus.Fields{
 			"proxy_addr":  proxyAddr,
 			"selected_ip": targetAddr,
 			"network":     network,
 			"cycle":       cycle,
-		}).Info("[StickyIP] Successfully connected to proxy IP - caching for this protocol")
+		}).Debug("[StickyIP] Successfully connected to proxy IP")
 	}
 }
 

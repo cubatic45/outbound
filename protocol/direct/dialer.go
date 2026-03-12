@@ -105,23 +105,21 @@ func (d *directDialer) tryRetry(err error, addr string, callback func()) {
 func (d *directDialer) createResolver(mark int, fallback bool) *net.Resolver {
 	if mark == 0 && !fallback {
 		return nil
-	} else {
-		return &net.Resolver{
-			PreferGo: true,
-			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-				dialer := net.Dialer{}
-				if mark != 0 {
-					dialer.Control = func(network, address string, c syscall.RawConn) error {
-						return netproxy.SoMarkControl(c, mark)
-					}
+	}
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			dialer := net.Dialer{}
+			if mark != 0 {
+				dialer.Control = func(network, address string, c syscall.RawConn) error {
+					return netproxy.SoMarkControl(c, mark)
 				}
-				if fallback {
-					return dialer.DialContext(ctx, network, d.Option.FallbackDNS)
-				} else {
-					return dialer.DialContext(ctx, network, address)
-				}
-			},
-		}
+			}
+			if fallback {
+				return dialer.DialContext(ctx, network, d.Option.FallbackDNS)
+			}
+			return dialer.DialContext(ctx, network, address)
+		},
 	}
 }
 
@@ -133,23 +131,24 @@ func (d *directDialer) dialUdp(ctx context.Context, addr string, mark int, fallb
 			})
 		}()
 	}
+	resolver := d.createResolver(mark, fallback)
 	if mark == 0 {
 		if d.Option.FullCone {
 			conn, err := net.ListenUDP("udp", d.udpLocalAddr)
 			if err != nil {
 				return nil, err
 			}
-			return &directPacketConn{UDPConn: conn, FullCone: true, dialTgt: addr, resolver: d.createResolver(mark, fallback)}, nil
+			return &directPacketConn{UDPConn: conn, FullCone: true, dialTgt: addr, resolver: resolver}, nil
 		} else {
 			dialer := net.Dialer{
 				LocalAddr: d.udpLocalAddr,
-				Resolver:  d.createResolver(mark, fallback),
+				Resolver:  resolver,
 			}
 			conn, err := dialer.DialContext(ctx, "udp", addr)
 			if err != nil {
 				return nil, err
 			}
-			return &directPacketConn{UDPConn: conn.(*net.UDPConn), FullCone: false, dialTgt: addr, resolver: d.createResolver(mark, fallback)}, nil
+			return &directPacketConn{UDPConn: conn.(*net.UDPConn), FullCone: false, dialTgt: addr, resolver: resolver}, nil
 		}
 
 	} else {
@@ -187,13 +186,13 @@ func (d *directDialer) dialUdp(ctx context.Context, addr string, mark int, fallb
 		return &directPacketConn{UDPConn: conn, FullCone: d.Option.FullCone, dialTgt: addr, resolver: &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-				d := net.Dialer{
+				dialer := net.Dialer{
 					Control: func(network, address string, c syscall.RawConn) error {
 						return netproxy.SoMarkControl(c, mark)
 					},
-					Resolver: d.createResolver(mark, fallback),
+					Resolver: resolver,
 				}
-				return d.DialContext(ctx, network, address)
+				return dialer.DialContext(ctx, network, address)
 			},
 		}}, nil
 	}
@@ -207,16 +206,18 @@ func (d *directDialer) dialTcp(ctx context.Context, addr string, mark int, mptcp
 			})
 		}()
 	}
-	var dialer *net.Dialer
+	var dialer net.Dialer
 	if mptcp {
-		dialer = d.tcpDialerMptcp
+		dialer = *d.tcpDialerMptcp
 	} else {
-		dialer = d.tcpDialer
+		dialer = *d.tcpDialer
 	}
 	if mark != 0 {
 		dialer.Control = func(network, address string, c syscall.RawConn) error {
 			return netproxy.SoMarkControl(c, mark)
 		}
+	} else {
+		dialer.Control = nil
 	}
 	dialer.Resolver = d.createResolver(mark, fallback)
 	return dialer.DialContext(ctx, "tcp", addr)
