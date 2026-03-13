@@ -35,16 +35,23 @@ type ProxyIpCache struct {
 }
 
 type proxyIpEntry struct {
-	// tcpAddr is the IP:port that works for TCP connections.
-	// May be empty if no TCP-validated IP is cached yet.
-	tcpAddr string
-	// udpAddr is the IP:port that works for UDP connections.
-	// May be empty if no UDP-validated IP is cached yet.
-	udpAddr string
+	// tcp4Addr is the IPv4:port that works for TCP connections.
+	tcp4Addr string
+	// tcp6Addr is the IPv6:port that works for TCP connections.
+	tcp6Addr string
+	// udp4Addr is the IPv4:port that works for UDP connections.
+	udp4Addr string
+	// udp6Addr is the IPv6:port that works for UDP connections.
+	udp6Addr string
 	// expiresAt is when this cache entry expires.
 	expiresAt time.Time
 	// checkCycle is the health check cycle number this entry belongs to.
 	checkCycle uint64
+}
+
+// cacheKey generates a cache key from network (tcp/udp) and IP version (4/6).
+func cacheKey(network, ipVersion string) string {
+	return network + ipVersion
 }
 
 // NewProxyIpCache creates a new proxy IP cache.
@@ -54,10 +61,10 @@ func NewProxyIpCache() *ProxyIpCache {
 	}
 }
 
-// Set stores a successful proxy IP address for a specific protocol with cycle tracking.
-// network should be "tcp" or "udp" - this ensures we only cache IPs that actually work
-// for the protocol being used.
-func (c *ProxyIpCache) Set(originalAddr, actualAddr string, network string, cycle uint64) {
+// Set stores a successful proxy IP address for a specific protocol and IP version with cycle tracking.
+// network should be "tcp" or "udp", ipVersion should be "4" or "6".
+// This ensures we only cache IPs that actually work for the specific protocol and address family.
+func (c *ProxyIpCache) Set(originalAddr, actualAddr string, network string, ipVersion string, cycle uint64) {
 	if c == nil {
 		return
 	}
@@ -75,32 +82,33 @@ func (c *ProxyIpCache) Set(originalAddr, actualAddr string, network string, cycl
 		c.cache[originalAddr] = entry
 	}
 
-	// Update the appropriate address based on network type
-	isUDP := network == "udp"
-	if isUDP {
-		entry.udpAddr = actualAddr
-		if logger.IsLevelEnabled(logrus.DebugLevel) {
-			logger.WithFields(logrus.Fields{
-				"original_addr": originalAddr,
-				"udp_addr":      actualAddr,
-				"cycle":         cycle,
-			}).Debug("[StickyIP] Cached proxy IP for UDP")
-		}
-	} else {
-		entry.tcpAddr = actualAddr
-		if logger.IsLevelEnabled(logrus.DebugLevel) {
-			logger.WithFields(logrus.Fields{
-				"original_addr": originalAddr,
-				"tcp_addr":      actualAddr,
-				"cycle":         cycle,
-			}).Debug("[StickyIP] Cached proxy IP for TCP")
-		}
+	// Update the appropriate address based on network type and IP version
+	key := cacheKey(network, ipVersion)
+	switch key {
+	case "tcp4":
+		entry.tcp4Addr = actualAddr
+	case "tcp6":
+		entry.tcp6Addr = actualAddr
+	case "udp4":
+		entry.udp4Addr = actualAddr
+	case "udp6":
+		entry.udp6Addr = actualAddr
+	}
+
+	if logger.IsLevelEnabled(logrus.DebugLevel) {
+		logger.WithFields(logrus.Fields{
+			"original_addr": originalAddr,
+			"actual_addr":   actualAddr,
+			"network":       network,
+			"ip_version":    ipVersion,
+			"cycle":         cycle,
+		}).Debug("[StickyIP] Cached proxy IP")
 	}
 }
 
-// GetWithCycle returns the cached IP for the specified network if it belongs to the current check cycle.
-// network should be "tcp" or "udp" - returns the protocol-specific cached IP.
-func (c *ProxyIpCache) GetWithCycle(proxyAddr string, network string, currentCycle uint64) string {
+// GetWithCycleAndIpVersion returns the cached IP for the specified network and IP version if it belongs to the current check cycle.
+// network should be "tcp" or "udp", ipVersion should be "4" or "6".
+func (c *ProxyIpCache) GetWithCycleAndIpVersion(proxyAddr string, network string, ipVersion string, currentCycle uint64) string {
 	if c == nil {
 		logger.WithField("proxy_addr", proxyAddr).Debug("[StickyIP] Cache is nil")
 		return proxyAddr
@@ -129,20 +137,26 @@ func (c *ProxyIpCache) GetWithCycle(proxyAddr string, network string, currentCyc
 		return proxyAddr
 	}
 
-	// Return the protocol-specific cached address
-	isUDP := network == "udp"
+	// Return the protocol and IP version specific cached address
 	var cachedAddr string
-	if isUDP {
-		cachedAddr = entry.udpAddr
-	} else {
-		cachedAddr = entry.tcpAddr
+	key := cacheKey(network, ipVersion)
+	switch key {
+	case "tcp4":
+		cachedAddr = entry.tcp4Addr
+	case "tcp6":
+		cachedAddr = entry.tcp6Addr
+	case "udp4":
+		cachedAddr = entry.udp4Addr
+	case "udp6":
+		cachedAddr = entry.udp6Addr
 	}
 
 	if cachedAddr == "" {
 		logger.WithFields(logrus.Fields{
 			"proxy_addr": proxyAddr,
 			"network":    network,
-		}).Debug("[StickyIP] No cached IP for this network type")
+			"ip_version": ipVersion,
+		}).Debug("[StickyIP] No cached IP for this network type and IP version")
 		return proxyAddr
 	}
 
@@ -150,8 +164,19 @@ func (c *ProxyIpCache) GetWithCycle(proxyAddr string, network string, currentCyc
 		"proxy_addr":  proxyAddr,
 		"cached_addr": cachedAddr,
 		"network":     network,
+		"ip_version":  ipVersion,
 	}).Debug("[StickyIP] Cache hit - returning cached IP")
 	return cachedAddr
+}
+
+// GetWithCycle returns the cached IP for the specified network (backward compatibility).
+// Deprecated: Use GetWithCycleAndIpVersion for proper IP version separation.
+func (c *ProxyIpCache) GetWithCycle(proxyAddr string, network string, currentCycle uint64) string {
+	// Try IPv4 first, then IPv6 for backward compatibility
+	if addr := c.GetWithCycleAndIpVersion(proxyAddr, network, "4", currentCycle); addr != proxyAddr {
+		return addr
+	}
+	return c.GetWithCycleAndIpVersion(proxyAddr, network, "6", currentCycle)
 }
 
 // Invalidate removes all cached entries for a proxy address.
@@ -164,9 +189,9 @@ func (c *ProxyIpCache) Invalidate(proxyAddr string) {
 	delete(c.cache, proxyAddr)
 }
 
-// InvalidateProtocol removes the cached entry for a specific protocol (tcp/udp).
-// This allows TCP and UDP to use different IPs when one protocol fails.
-func (c *ProxyIpCache) InvalidateProtocol(proxyAddr, network string) {
+// InvalidateProtocolAndIpVersion removes the cached entry for a specific protocol and IP version.
+// This allows fine-grained invalidation when a specific protocol + address family combination fails.
+func (c *ProxyIpCache) InvalidateProtocolAndIpVersion(proxyAddr, network, ipVersion string) {
 	if c == nil {
 		return
 	}
@@ -177,29 +202,35 @@ func (c *ProxyIpCache) InvalidateProtocol(proxyAddr, network string) {
 		return
 	}
 
-	isUDP := network == "udp"
-	if isUDP {
-		entry.udpAddr = ""
-		// If both are empty now, remove the entry entirely
-		if entry.tcpAddr == "" {
-			delete(c.cache, proxyAddr)
-		} else {
-			logger.WithFields(logrus.Fields{
-				"proxy_addr": proxyAddr,
-				"network":    network,
-			}).Debug("[StickyIP] Invalidated UDP cache, TCP cache retained")
-		}
-	} else {
-		entry.tcpAddr = ""
-		if entry.udpAddr == "" {
-			delete(c.cache, proxyAddr)
-		} else {
-			logger.WithFields(logrus.Fields{
-				"proxy_addr": proxyAddr,
-				"network":    network,
-			}).Debug("[StickyIP] Invalidated TCP cache, UDP cache retained")
-		}
+	key := cacheKey(network, ipVersion)
+	switch key {
+	case "tcp4":
+		entry.tcp4Addr = ""
+	case "tcp6":
+		entry.tcp6Addr = ""
+	case "udp4":
+		entry.udp4Addr = ""
+	case "udp6":
+		entry.udp6Addr = ""
 	}
+
+	// If all addresses are empty now, remove the entry entirely
+	if entry.tcp4Addr == "" && entry.tcp6Addr == "" && entry.udp4Addr == "" && entry.udp6Addr == "" {
+		delete(c.cache, proxyAddr)
+	} else {
+		logger.WithFields(logrus.Fields{
+			"proxy_addr": proxyAddr,
+			"network":    network,
+			"ip_version": ipVersion,
+		}).Debug("[StickyIP] Invalidated cache for protocol+IP version")
+	}
+}
+
+// InvalidateProtocol removes the cached entries for a specific protocol (both IPv4 and IPv6).
+// This is kept for backward compatibility but invalidates both IP versions.
+func (c *ProxyIpCache) InvalidateProtocol(proxyAddr, network string) {
+	c.InvalidateProtocolAndIpVersion(proxyAddr, network, "4")
+	c.InvalidateProtocolAndIpVersion(proxyAddr, network, "6")
 }
 
 // InvalidateCycle removes all cache entries for a specific cycle.
@@ -269,6 +300,19 @@ func (d *StickyIpDialer) InvalidateProtocolCache(proxyAddr, protocol string) {
 	}
 }
 
+// InvalidateProtocolAndIpVersionCache invalidates the cached IP for a specific protocol and IP version.
+// This provides fine-grained cache invalidation when a specific combination fails.
+func (d *StickyIpDialer) InvalidateProtocolAndIpVersionCache(proxyAddr, protocol, ipVersion string) {
+	d.cache.InvalidateProtocolAndIpVersion(proxyAddr, protocol, ipVersion)
+	if logger.IsLevelEnabled(logrus.DebugLevel) {
+		logger.WithFields(logrus.Fields{
+			"proxy_addr": proxyAddr,
+			"protocol":   protocol,
+			"ip_version": ipVersion,
+		}).Debug("[StickyIP] Protocol+IP version cache invalidated due to connection failure")
+	}
+}
+
 // GetCachedProxyAddr returns the cached IP for the proxy address and network type.
 // network should be "tcp" or "udp".
 func (d *StickyIpDialer) GetCachedProxyAddr(network string) string {
@@ -276,6 +320,15 @@ func (d *StickyIpDialer) GetCachedProxyAddr(network string) string {
 		return ""
 	}
 	return d.cache.GetWithCycle(d.proxyAddr, network, d.checkCycle)
+}
+
+// GetCachedProxyAddrWithIpVersion returns the cached IP for the proxy address, network type and IP version.
+// network should be "tcp" or "udp", ipVersion should be "4" or "6".
+func (d *StickyIpDialer) GetCachedProxyAddrWithIpVersion(network, ipVersion string) string {
+	if d == nil {
+		return ""
+	}
+	return d.cache.GetWithCycleAndIpVersion(d.proxyAddr, network, ipVersion, d.checkCycle)
 }
 
 // DialContext implements sticky IP caching by intercepting dial calls.
@@ -465,8 +518,13 @@ func (d *StickyIpDialer) dialWithIpResolution(ctx context.Context, network, addr
 			}
 
 			// This IP works for this protocol, cache it
-			d.cache.Set(d.proxyAddr, targetAddr, baseNetwork, d.checkCycle)
-			logIPSuccess(d.proxyAddr, targetAddr, baseNetwork, d.checkCycle)
+			// Determine IP version from the successful IP
+			ipVersion := "4"
+			if ipAddr.IP.To4() == nil {
+				ipVersion = "6"
+			}
+			d.cache.Set(d.proxyAddr, targetAddr, baseNetwork, ipVersion, d.checkCycle)
+			logIPSuccess(d.proxyAddr, targetAddr, baseNetwork, ipVersion, d.checkCycle)
 			return conn, nil
 		}
 		lastErr = err
@@ -551,12 +609,13 @@ func logTryingIP(proxyAddr, targetAddr, network string) {
 	}
 }
 
-func logIPSuccess(proxyAddr, targetAddr, network string, cycle uint64) {
+func logIPSuccess(proxyAddr, targetAddr, network, ipVersion string, cycle uint64) {
 	if logger.IsLevelEnabled(logrus.DebugLevel) {
 		logger.WithFields(logrus.Fields{
 			"proxy_addr":  proxyAddr,
 			"selected_ip": targetAddr,
 			"network":     network,
+			"ip_version":  ipVersion,
 			"cycle":       cycle,
 		}).Debug("[StickyIP] Successfully connected to proxy IP")
 	}
