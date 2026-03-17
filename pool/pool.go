@@ -38,15 +38,28 @@ func GetClosestN(need int) (n int) {
 }
 
 func GetBiggerClosestN(need int) (n int) {
-	// or return its closest n
-	return bits.Len32(uint32(need))
+	n = bits.Len32(uint32(need))
+	// bits.Len32 returns the number of bits needed to represent the number.
+	// For a power of 2, it returns exponent+1, so we subtract 1.
+	// For other numbers, we need the next power of 2, which is what bits.Len32 gives.
+	// Examples:
+	//   need=1024 (2^10): bits.Len32=11 → return 10
+	//   need=1025: bits.Len32=11 → return 11 (need 2^11=2048)
+	//   need=2048 (2^11): bits.Len32=12 → return 11
+	//   need=2049: bits.Len32=12 → return 12 (need 2^12=4096)
+	if need == (1 << (n - 1)) {
+		// need is exactly a power of 2
+		return n - 1
+	}
+	return n
 }
 
 // Get gets a buffer from pool, size should in range: [1, 65536],
 // otherwise, this function will call make([]byte, size) directly.
+// IMPORTANT: Returns a buffer with capacity >= size to prevent slice bounds panic.
 func Get(size int) PB {
 	if size >= 1 && size <= maxsize {
-		i := GetClosestN(size)
+		i := GetBiggerClosestN(size) // Fixed: Use GetBiggerClosestN to ensure capacity >= size
 		if i < minsizePower {
 			i = minsizePower
 		}
