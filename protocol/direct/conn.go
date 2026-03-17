@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/daeuniverse/outbound/common"
@@ -15,8 +16,9 @@ type directPacketConn struct {
 	*net.UDPConn
 	FullCone      bool
 	dialTgt       string
-	cachedDialTgt netip.AddrPort
-	cacheMu       sync.Mutex
+	cachedDialTgt atomic.Pointer[netip.AddrPort]
+	cacheOnce     sync.Once
+	cacheErr      error
 	resolver      *net.Resolver
 }
 
@@ -52,22 +54,32 @@ func (c *directPacketConn) WriteToUDP(b []byte, addr *net.UDPAddr) (int, error) 
 	return c.UDPConn.WriteToUDP(b, addr)
 }
 
+func (c *directPacketConn) resolveTarget() error {
+	c.cacheOnce.Do(func() {
+		ua, err := resolveUDPAddr(c.resolver, c.dialTgt)
+		if err != nil {
+			c.cacheErr = err
+			return
+		}
+		ap := ua.AddrPort()
+		c.cachedDialTgt.Store(&ap)
+	})
+	return c.cacheErr
+}
+
 func (c *directPacketConn) Write(b []byte) (int, error) {
 	if !c.FullCone {
 		return c.UDPConn.Write(b)
 	}
-	c.cacheMu.Lock()
-	if !c.cachedDialTgt.IsValid() {
-		ua, err := resolveUDPAddr(c.resolver, c.dialTgt)
-		if err != nil {
-			c.cacheMu.Unlock()
+
+	cached := c.cachedDialTgt.Load()
+	if cached == nil {
+		if err := c.resolveTarget(); err != nil {
 			return 0, err
 		}
-		c.cachedDialTgt = ua.AddrPort()
+		cached = c.cachedDialTgt.Load()
 	}
-	target := c.cachedDialTgt
-	c.cacheMu.Unlock()
-	return c.UDPConn.WriteToUDPAddrPort(b, target)
+	return c.UDPConn.WriteToUDPAddrPort(b, *cached)
 }
 
 func (c *directPacketConn) Read(b []byte) (int, error) {

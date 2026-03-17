@@ -1,7 +1,10 @@
 package shadowsocks
 
 import (
+	"crypto/sha1"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"strconv"
@@ -11,6 +14,7 @@ import (
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
 	disk_bloom "github.com/mzz2017/disk-bloom"
+	"golang.org/x/crypto/hkdf"
 )
 
 // [LEGACY] Global switch for UDP cipher cache optimization (kept for reference):
@@ -80,6 +84,10 @@ func (c *UdpConn) Write(b []byte) (n int, err error) {
 	return c.WriteTo(b, c.tgtAddr)
 }
 
+// maxMetadataLen returns the maximum possible metadata length for pre-allocation.
+// IPv6 (1 + 16 + 2) = 19 bytes is the maximum.
+const maxMetadataLen = 19
+
 func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	metadata := Metadata{
 		Metadata: c.metadata,
@@ -91,33 +99,127 @@ func (c *UdpConn) WriteTo(b []byte, addr string) (int, error) {
 	metadata.Hostname = mdata.Hostname
 	metadata.Port = mdata.Port
 	metadata.Type = mdata.Type
-	prefix, err := metadata.BytesFromPool()
-	if err != nil {
-		return 0, err
-	}
-	defer pool.Put(prefix)
-	chunk := pool.Get(len(prefix) + len(b))
-	defer pool.Put(chunk)
-	copy(chunk, prefix)
-	copy(chunk[len(prefix):], b)
-	salt := c.sg.Get()
 
+	// Pre-calculate total size to allocate once
+	// Layout: [salt][metadata][payload][tag]
+	prefixLen := metadataLen(metadata.Type)
+	totalLen := c.cipherConf.SaltLen + prefixLen + len(b) + c.cipherConf.TagLen
+
+	// Single allocation for the entire packet
+	buf := pool.Get(totalLen)
+	defer func() {
+		if err != nil {
+			pool.Put(buf)
+		}
+	}()
+
+	// Write salt at the beginning
+	salt := c.sg.Get()
+	copy(buf, salt)
+	pool.Put(salt)
+
+	// Write metadata inline after salt
+	offset := c.cipherConf.SaltLen
+	offset += writeMetadataInline(buf[offset:], &metadata)
+
+	// Write payload
+	copy(buf[offset:], b)
+	payloadEnd := offset + len(b)
+
+	// Encrypt in-place
 	key := &Key{
 		CipherConf: c.cipherConf,
 		MasterKey:  c.masterKey,
 	}
 
-	toWrite, err := EncryptUDPFromPool(key, chunk, salt, ShadowsocksReusedInfo)
-
-	pool.Put(salt)
+	toWrite, err := encryptUDPInPlace(key, buf, payloadEnd, ShadowsocksReusedInfo)
 	if err != nil {
 		return 0, err
 	}
 	defer pool.Put(toWrite)
+
 	if c.bloom != nil {
 		c.bloom.ExistOrAdd(toWrite[:c.cipherConf.SaltLen])
 	}
 	return c.PacketConn.WriteTo(toWrite, c.proxyAddress)
+}
+
+// metadataLen returns the length of metadata for a given type.
+func metadataLen(typ protocol.MetadataType) int {
+	switch typ {
+	case protocol.MetadataTypeIPv4:
+		return 1 + 4 + 2 // type + ipv4 + port
+	case protocol.MetadataTypeIPv6:
+		return 1 + 16 + 2 // type + ipv6 + port
+	case protocol.MetadataTypeDomain:
+		return 1 + 1 + 255 + 2 // type + len + max domain + port (will be truncated)
+	case protocol.MetadataTypeMsg:
+		return 1 + 1 + 4 // type + cmd + len
+	default:
+		return 19 // max possible
+	}
+}
+
+// writeMetadataInline writes metadata directly to the buffer without extra allocation.
+func writeMetadataInline(buf []byte, meta *Metadata) int {
+	buf[0] = MetadataTypeToByte(meta.Type)
+	switch meta.Type {
+	case protocol.MetadataTypeIPv4:
+		ip := net.ParseIP(meta.Hostname)
+		if ip != nil {
+			copy(buf[1:], ip.To4()[:4])
+		}
+		binary.BigEndian.PutUint16(buf[5:], meta.Port)
+		return 7
+	case protocol.MetadataTypeIPv6:
+		ip := net.ParseIP(meta.Hostname)
+		if ip != nil {
+			copy(buf[1:], ip[:16])
+		}
+		binary.BigEndian.PutUint16(buf[17:], meta.Port)
+		return 19
+	case protocol.MetadataTypeDomain:
+		hostname := []byte(meta.Hostname)
+		lenDN := len(hostname)
+		if lenDN > 255 {
+			lenDN = 255
+		}
+		buf[1] = uint8(lenDN)
+		copy(buf[2:], hostname[:lenDN])
+		binary.BigEndian.PutUint16(buf[2+lenDN:], meta.Port)
+		return 4 + lenDN
+	case protocol.MetadataTypeMsg:
+		buf[1] = uint8(meta.Cmd)
+		binary.BigEndian.PutUint32(buf[2:], meta.LenMsgBody)
+		return 6
+	default:
+		return 0
+	}
+}
+
+// encryptUDPInPlace encrypts the buffer in place, returning the final packet.
+func encryptUDPInPlace(key *Key, buf []byte, payloadLen int, reusedInfo []byte) (pool.PB, error) {
+	subKey := getSubKey(key.CipherConf.KeyLen)
+	defer putSubKey(subKey)
+
+	kdf := hkdf.New(sha1.New, key.MasterKey, buf[:key.CipherConf.SaltLen], reusedInfo)
+	if _, err := io.ReadFull(kdf, subKey); err != nil {
+		return nil, err
+	}
+
+	ciph, err := key.CipherConf.NewCipher(subKey)
+	if err != nil {
+		return nil, err
+	}
+
+	// Seal in-place: we need space for tag at the end
+	// Input is buf[saltLen:payloadLen], output goes to buf[saltLen:payloadLen+tagLen]
+	encrypted := ciph.Seal(buf[key.CipherConf.SaltLen:key.CipherConf.SaltLen], 
+		ciphers.ZeroNonce[:key.CipherConf.NonceLen], 
+		buf[key.CipherConf.SaltLen:payloadLen], 
+		nil)
+	
+	return buf[:key.CipherConf.SaltLen+len(encrypted)], nil
 }
 
 func (c *UdpConn) ReadFrom(b []byte) (n int, addr netip.AddrPort, err error) {

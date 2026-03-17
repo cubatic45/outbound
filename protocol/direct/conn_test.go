@@ -70,7 +70,8 @@ func TestDirectPacketConnConcurrentWriteInitializesCachedTargetSafely(t *testing
 
 	wg.Wait()
 
-	if !conn.cachedDialTgt.IsValid() {
+	cached := conn.cachedDialTgt.Load()
+	if cached == nil || !cached.IsValid() {
 		t.Fatal("cachedDialTgt was not initialized")
 	}
 }
