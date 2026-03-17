@@ -20,6 +20,9 @@ type directPacketConn struct {
 	cacheOnce     sync.Once
 	cacheErr      error
 	resolver      *net.Resolver
+	// writeMu serializes concurrent Write calls in FullCone mode.
+	// Prevents race between target resolution and actual write operations.
+	writeMu sync.Mutex
 }
 
 func (c *directPacketConn) ReadFrom(p []byte) (int, netip.AddrPort, error) {
@@ -72,13 +75,18 @@ func (c *directPacketConn) Write(b []byte) (int, error) {
 		return c.UDPConn.Write(b)
 	}
 
-	cached := c.cachedDialTgt.Load()
-	if cached == nil {
+	// Ensure target is resolved
+	if c.cachedDialTgt.Load() == nil {
 		if err := c.resolveTarget(); err != nil {
 			return 0, err
 		}
-		cached = c.cachedDialTgt.Load()
 	}
+
+	// Serialize writes to prevent concurrent access to the same UDP connection
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	cached := c.cachedDialTgt.Load()
 	return c.UDPConn.WriteToUDPAddrPort(b, *cached)
 }
 

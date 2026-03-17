@@ -88,8 +88,15 @@ func Put(buf []byte) {
 		return
 	}
 	
-	// find the largest bucket i such that 1<<i <= size
-	i := bits.Len32(uint32(size)) - 1
+	// For non-power-of-2 sizes, use GetBiggerClosestN to round up to the next bucket.
+	// This ensures capacity is not wasted and buffers go to the correct bucket.
+	// Examples:
+	//   - size=1536 -> i=11 (bucket for 2048) instead of 10 (bucket for 1024)
+	//   - size=1024 -> i=10 (bucket for 1024)
+	i := GetBiggerClosestN(size)
+	if i < minsizePower {
+		i = minsizePower
+	}
 	if i < num {
 		pools[i].Put(buf)
 	}
