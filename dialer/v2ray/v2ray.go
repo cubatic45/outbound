@@ -19,6 +19,7 @@ import (
 	"github.com/daeuniverse/outbound/transport/meek"
 	"github.com/daeuniverse/outbound/transport/tls"
 	"github.com/daeuniverse/outbound/transport/ws"
+	"github.com/daeuniverse/outbound/transport/xhttp"
 	jsoniter "github.com/json-iterator/go"
 )
 
@@ -48,6 +49,7 @@ type V2Ray struct {
 	SpiderX       string `json:"spx,omitempty"`
 	V             string `json:"v"`
 	Protocol      string `json:"protocol"`
+	XhttpMode     string `json:"mode,omitempty"`
 }
 
 func NewV2Ray(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
@@ -87,9 +89,16 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 		if s.Protocol != "vless" {
 			return nil, nil, fmt.Errorf("only VLESS supports reality")
 		}
+		if s.Net == "xhttp" {
+			return nil, nil, fmt.Errorf("xhttp with reality is not supported yet")
+		}
 	}
 
-	switch strings.ToLower(s.Net) {
+	netType := strings.ToLower(s.Net)
+	if netType == "splithttp" {
+		netType = "xhttp"
+	}
+	switch netType {
 	case "ws":
 		scheme := "ws"
 		if s.TLS == "tls" || s.TLS == "reality" {
@@ -233,6 +242,45 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 		if err != nil {
 			return nil, nil, err
 		}
+	case "xhttp":
+		if s.TLS == "tls" {
+			sni := s.SNI
+			if sni == "" {
+				sni = s.Host
+			}
+			tu := url.URL{
+				Scheme: option.TlsImplementation,
+				Host:   net.JoinHostPort(s.Add, s.Port),
+				RawQuery: url.Values{
+					"sni":           []string{sni},
+					"allowInsecure": []string{common.BoolToString(s.AllowInsecure || option.AllowInsecure)},
+					"utlsImitate":   []string{option.UtlsImitate},
+					"alpn":          []string{s.Alpn},
+				}.Encode(),
+			}
+			d, _, err = tls.NewTls(option, d, tu.String())
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		scheme := "http"
+		if s.TLS == "tls" {
+			scheme = "https"
+		}
+		xu := url.URL{
+			Scheme: scheme,
+			Host:   net.JoinHostPort(s.Add, s.Port),
+			RawQuery: url.Values{
+				"host": []string{s.Host},
+				"path": []string{s.Path},
+				"mode": []string{s.XhttpMode},
+				"alpn": []string{s.Alpn},
+			}.Encode(),
+		}
+		d, err = xhttp.NewDialer(xu.String(), d)
+		if err != nil {
+			return nil, nil, err
+		}
 	default:
 		return nil, nil, fmt.Errorf("%w: network: %v", dialer.UnexpectedFieldErr, s.Net)
 	}
@@ -280,9 +328,13 @@ func ParseVlessURL(vless string) (data *V2Ray, err error) {
 		SpiderX:       u.Query().Get("spx"),
 		V:             "2",
 		Protocol:      "vless",
+		XhttpMode:     u.Query().Get("mode"),
 	}
 	if data.Net == "" {
 		data.Net = "tcp"
+	}
+	if data.Net == "splithttp" {
+		data.Net = "xhttp"
 	}
 	if data.Net == "grpc" {
 		data.Path = u.Query().Get("serviceName")
@@ -389,9 +441,10 @@ func (s *V2Ray) ExportToURL() string {
 		common.SetValue(&query, "type", s.Net)
 		common.SetValue(&query, "security", s.TLS)
 		switch s.Net {
-		case "websocket", "ws", "http", "h2", "httpupgrade":
+		case "websocket", "ws", "http", "h2", "httpupgrade", "xhttp":
 			common.SetValue(&query, "path", s.Path)
 			common.SetValue(&query, "host", s.Host)
+			common.SetValue(&query, "mode", s.XhttpMode)
 		case "mkcp", "kcp":
 			common.SetValue(&query, "headerType", s.Type)
 			common.SetValue(&query, "seed", s.Path)

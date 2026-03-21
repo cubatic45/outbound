@@ -16,6 +16,7 @@ import (
 	"github.com/daeuniverse/outbound/transport/grpc"
 	"github.com/daeuniverse/outbound/transport/httpupgrade"
 	"github.com/daeuniverse/outbound/transport/ws"
+	"github.com/daeuniverse/outbound/transport/xhttp"
 )
 
 func init() {
@@ -36,6 +37,7 @@ type Trojan struct {
 	ServiceName   string `json:"serviceName"`
 	AllowInsecure bool   `json:"allowInsecure"`
 	Protocol      string `json:"protocol"`
+	XhttpMode     string `json:"mode,omitempty"`
 }
 
 func NewTrojan(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
@@ -100,6 +102,19 @@ func (s *Trojan) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) 
 		}
 
 		if d, err = httpupgrade.NewDialer(u.String(), d); err != nil {
+			return nil, nil, err
+		}
+	case "xhttp":
+		xu := url.URL{
+			Scheme: "https",
+			Host:   net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
+			RawQuery: url.Values{
+				"host": []string{s.Host},
+				"path": []string{s.Path},
+				"mode": []string{s.XhttpMode},
+			}.Encode(),
+		}
+		if d, err = xhttp.NewDialer(xu.String(), d); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -179,6 +194,10 @@ func ParseTrojanURL(u string) (data *Trojan, err error) {
 		if data.Type == "grpc" && data.ServiceName == "" {
 			data.ServiceName = data.Path
 		}
+		if data.Type == "splithttp" {
+			data.Type = "xhttp"
+		}
+		data.XhttpMode = t.Query().Get("mode")
 	}
 	return data, nil
 }
@@ -202,6 +221,7 @@ func (t *Trojan) ExportToURL() string {
 		common.SetValue(&q, "encryption", t.Encryption)
 		common.SetValue(&q, "type", t.Type)
 		common.SetValue(&q, "path", t.Path)
+		common.SetValue(&q, "mode", t.XhttpMode)
 	}
 	u.RawQuery = q.Encode()
 	return u.String()
